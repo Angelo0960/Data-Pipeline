@@ -304,3 +304,118 @@ Only an **APPROVED** extraction is automatically handed over to the Transformati
 This stage validates the reliability and completeness of the **extraction process only**.
 
 Data cleaning, standardization, business-rule validation, calculations, aggregation, and analytical transformations are not performed during Extraction. These operations are handled in the **Transformation Stage**.
+
+
+
+
+## 6. Extraction Data Contract and Naming Convention
+
+The extraction data contract defines the expected structure, identifiers, data types, naming rules, and schema consistency requirements for data extracted from the Supabase project `it332-capstone-PrePApig`.
+
+The extracted data must maintain a consistent structure so that the CSV outputs can be reliably passed from the Extraction Stage to the Transformation Stage.
+
+---
+
+### 6.1 Required Schema
+
+The extraction process is expected to retrieve the following four tables from the Supabase `it332-capstone-PrePApig` project:
+
+1. `pig_batches`
+2. `feed_records`
+3. `vaccination_records`
+4. `expenses`
+
+#### Table: `pig_batches`
+
+| Column | Data Type | Requirement / Constraint |
+|---|---|---|
+| `id` | UUID | Primary Key |
+| `batch_code` | VARCHAR(50) | UNIQUE, NOT NULL |
+| `pig_count` | INTEGER | NOT NULL |
+| `breed` | VARCHAR(100) | — |
+| `start_weight` | DECIMAL(10,2) | — |
+| `current_weight` | DECIMAL(10,2) | — |
+| `date_acquired` | DATE | — |
+| `status` | VARCHAR(20) | DEFAULT 'Active' |
+| `created_at` | TIMESTAMP | DEFAULT NOW() |
+
+#### Table: `feed_records`
+
+| Column | Data Type | Requirement / Constraint |
+|---|---|---|
+| `id` | UUID | Primary Key |
+| `batch_id` | UUID | Foreign Key → `pig_batches.id` |
+| `feed_type` | VARCHAR(100) | NOT NULL |
+| `quantity_kg` | DECIMAL(10,2) | NOT NULL |
+| `feeding_date` | DATE | NOT NULL |
+| `feeding_time` | VARCHAR(20) | — |
+| `created_at` | TIMESTAMP | DEFAULT NOW() |
+
+#### Table: `vaccination_records`
+
+| Column | Data Type | Requirement / Constraint |
+|---|---|---|
+| `id` | UUID | Primary Key |
+| `batch_id` | UUID | Foreign Key → `pig_batches.id` |
+| `vaccine_name` | VARCHAR(100) | NOT NULL |
+| `vaccination_date` | DATE | NOT NULL |
+| `next_due_date` | DATE | — |
+| `administered_by` | VARCHAR(100) | — |
+| `dosage` | VARCHAR(50) | — |
+| `notes` | TEXT | — |
+| `status` | VARCHAR(20) | DEFAULT 'Completed' |
+| `created_at` | TIMESTAMP | DEFAULT NOW() |
+
+#### Table: `expenses`
+
+| Column | Data Type | Requirement / Constraint |
+|---|---|---|
+| `id` | UUID | Primary Key |
+| `batch_id` | UUID | Foreign Key → `pig_batches.id` |
+| `expense_type` | VARCHAR(100) | NOT NULL |
+| `amount` | DECIMAL(10,2) | NOT NULL |
+| `expense_date` | DATE | NOT NULL |
+| `description` | TEXT | — |
+| `created_at` | TIMESTAMP | DEFAULT NOW() |
+
+### Required Identifiers and Relationships
+
+The extraction must preserve the following identifiers:
+
+- `pig_batches.id` — Primary Key
+- `feed_records.id` — Primary Key
+- `vaccination_records.id` — Primary Key
+- `expenses.id` — Primary Key
+- `feed_records.batch_id` → `pig_batches.id`
+- `vaccination_records.batch_id` → `pig_batches.id`
+- `expenses.batch_id` → `pig_batches.id`
+
+The `batch_code` field in `pig_batches` must remain unique.
+
+---
+
+### 6.2 Naming Convention
+
+The extracted data follows the existing naming convention defined by the PrepAPig source schema.
+
+#### Column Naming Format
+
+All column names use **snake_case**.
+
+Examples:
+
+```text
+batch_code
+pig_count
+start_weight
+current_weight
+date_acquired
+feed_type
+quantity_kg
+feeding_date
+vaccine_name
+vaccination_date
+next_due_date
+expense_type
+expense_date
+created_at
