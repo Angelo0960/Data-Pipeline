@@ -33,6 +33,53 @@ The system serves as the primary source of operational farming data that will be
 
 ### 1.3. Extraction Method
 
+#### Extraction Type
+
+The pipeline uses **incremental batch extraction** after the initial load. The initial run extracts the available source records as a baseline. Later runs extract only records created within the new extraction window.
+
+#### Extraction Window and Incremental Logic
+
+The incremental watermark is the `created_at` timestamp available in each extraction table:
+
+- `pig_batches.created_at`
+- `feed_records.created_at`
+- `vaccination_records.created_at`
+- `expenses.created_at`
+
+For each table, the extraction window is:
+
+```text
+last_successful_extraction_timestamp < created_at <= current_extraction_timestamp
+```
+
+The `last_successful_extraction_timestamp` is read from the previous successful pipeline run. The `current_extraction_timestamp` is captured when the extraction starts and remains fixed for that run. A record is extracted when its `created_at` falls inside this window. The upper-bound timestamp is included so records created during the run are not skipped, while the previous lower bound is excluded to prevent duplicate extraction.
+
+If a table does not contain a usable `created_at` value, the extraction must flag the limitation and use the table's documented date field only if the team explicitly approves that mapping. Records with missing timestamps are reported as extraction exceptions rather than silently omitted.
+
+#### Extraction Process
+
+1. Node.js Cron starts the scheduled Python ETL script.
+2. The Python script records the run start time as the current extraction timestamp.
+3. It reads the previous successful extraction timestamp for each source table.
+4. It connects to the PrepAPig operational database and queries each included table using the incremental window.
+5. It extracts the related `pig_batches`, `feed_records`, `vaccination_records`, and `expenses` records while preserving primary and foreign keys.
+6. It validates source accessibility, required tables, required columns, identifiers, and extracted record counts.
+7. It records the extraction metadata and validation results.
+8. Only after a successful extraction and validation does it save the new watermark for the next run and hand the extracted dataset to the Transformation stage.
+
+The extraction stage does not perform business transformations or data cleaning beyond the checks required to confirm that the source data can be safely extracted.
+
+#### Extraction Tool and Technology
+
+- **Scheduler/orchestrator:** Node.js Cron
+- **Extraction script:** Python ETL script
+- **Extraction technology:** Python database connection and SQL queries against the PrepAPig operational database
+- **Source system:** PrepAPig operational database
+- **Output handover:** Validated extracted dataset plus run metadata, validation results, and the extraction window
+
+#### Extraction Schedule
+
+The pipeline runs **once per day** at the predefined time configured in Node.js Cron. The exact clock time is controlled by the deployment configuration. Each scheduled run creates a new pipeline run ID and extraction window. Failed runs do not advance the successful-extraction watermark; the next run retries the unprocessed window.
 
 
 ### 1.4. Extraction Scope
@@ -164,6 +211,7 @@ pig_batches (1)
 ```
 
 The `batch_id` foreign key in each child table links extracted records to their parent pig batch. These relationships must be preserved in the extracted dataset so downstream processing can join records accurately.
+
 
 
 
@@ -304,3 +352,65 @@ Only an **APPROVED** extraction is automatically handed over to the Transformati
 This stage validates the reliability and completeness of the **extraction process only**.
 
 Data cleaning, standardization, business-rule validation, calculations, aggregation, and analytical transformations are not performed during Extraction. These operations are handled in the **Transformation Stage**.
+
+
+
+## 4. Extraction Metadata and Log Specification
+
+The extraction process produces one metadata and log record for every scheduled pipeline run. The run log connects the extraction window, source table, validation results, record counts, and final handover decision so that each extracted dataset can be traced from the PrepAPig operational database to the next pipeline stage.
+
+### 4.1 Extraction Metadata Specification
+
+| Metadata Field | Purpose | Example / Format |
+|---|---|---|
+| `pipeline_run_id` | Uniquely identifies each execution of the extraction pipeline. | `PREPAPIG_20261004_230000` |
+| `table_name` | Identifies the Supabase table being extracted. | `feed_records` |
+| `extraction_start` | Records the date and time when extraction of the table started. | `2026-10-04 23:00:00` |
+| `extraction_end` | Records the date and time when extraction of the table finished. | `2026-10-04 23:00:03` |
+| `extraction_status` | Indicates whether the extraction operation completed successfully. | `SUCCESS`, `WARNING`, or `FAILED` |
+| `records_read` | Number of records returned from the Supabase REST API for the extraction window. | `25` |
+| `records_extracted` | Number of records successfully included in the extraction output. | `25` |
+| `records_rejected` | Number of records rejected because of critical extraction-level validation failures, if applicable. | `0` |
+| `window_start` | Previous successful extraction timestamp used as the lower boundary of the incremental extraction. | `2026-10-03 23:00:00` |
+| `window_end` | Current extraction timestamp used as the upper boundary of the incremental extraction. | `2026-10-04 23:00:00` |
+| `validation_result` | Overall validation result for the extracted table. | `PASS`, `WARNING`, or `FAIL` |
+| `error_message` | Records an error encountered during extraction. Remains empty when no error occurs. | `HTTP 401: Unauthorized` or empty |
+| `extraction_duration` | Total time required to complete the extraction operation. | `3 seconds` |
+
+### 4.2 How Metadata and Logs Connect to the Extraction Process
+
+1. Node.js Cron starts the Python ETL script and the script creates a unique `pipeline_run_id`.
+2. The script records `extraction_start` and uses it as the fixed `window_end` for the current extraction run.
+3. For each Supabase table, the script reads the previous successful watermark into `window_start` and extracts records where `created_at` satisfies:
+
+   ```text
+   window_start < created_at <= window_end
+   ```
+
+4. The table-level log records `table_name`, `records_read`, `records_extracted`, and `records_rejected`.
+5. The script records `validation_result` for source accessibility, required tables and columns, required identifiers, record counts, and extraction errors.
+6. The script records `extraction_end` after extraction and validation finish, then calculates `extraction_duration` from `extraction_start` to `extraction_end`.
+7. If all critical checks pass, `extraction_status` is `SUCCESS` and `validation_result` is `PASS`. The new successful timestamp is saved as the next `window_start` only after the extracted dataset is accepted.
+8. If a critical check fails, `extraction_status` is `FAILED` and `validation_result` is `FAIL`. The `error_message` records the cause, the current window is not marked successful, and the next scheduled run retries the unprocessed window.
+9. If only non-critical issues occur, `extraction_status` is `WARNING` and `validation_result` is `WARNING`. The affected records are counted in `records_rejected` and the handover is held for review according to the acceptance rules.
+
+### 4.3 Monitoring, Troubleshooting, Auditing, and Recovery
+
+- **Monitoring:** Operators use status, duration, record counts, validation results, and window boundaries to confirm that the daily extraction completed and that the volume is reasonable.
+- **Troubleshooting:** The `pipeline_run_id`, `table_name`, timestamps, error message, and extraction window identify the affected run and table without requiring the entire source query to be repeated.
+- **Auditing:** The log preserves what was extracted, when it was extracted, which Supabase table was used, which validation result was produced, and whether the output was accepted for the next stage.
+- **Recovery:** A failed run does not advance the successful watermark. The next run reuses the last successful `window_start`, allowing the missed window to be retried without silently losing records.
+
+### 4.4 Log Record Relationship
+
+Each scheduled run has one run-level record and one table-level record for every source table processed:
+
+```text
+pipeline_run_id
+    ├── pig_batches log
+    ├── feed_records log
+    ├── vaccination_records log
+    └── expenses log
+```
+
+This structure keeps the logs connected to the incremental extraction method and provides a complete handover package: the extracted data, the extraction window, record counts, validation results, status, and any errors.
