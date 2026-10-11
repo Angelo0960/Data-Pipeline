@@ -244,9 +244,14 @@ def validate_records(records_by_table: dict[str, list[dict[str, Any]]]) -> dict[
         duplicate_ids = sorted({record_id for record_id in ids if ids.count(record_id) > 1 and record_id})
         missing_ids = sum(1 for record_id in ids if not record_id)
         invalid_batch_ids = 0
+        null_batch_ids = 0
         if table != "pig_batches":
+            null_batch_ids = sum(1 for row in records if not row.get("batch_id"))
             invalid_batch_ids = sum(
-                1 for row in records if not row.get("batch_id") or row.get("batch_id") not in batch_ids
+                1
+                for row in records
+                if (not row.get("batch_id") and table != "expenses")
+                or (row.get("batch_id") and row.get("batch_id") not in batch_ids)
             )
 
         table_result = {
@@ -256,6 +261,8 @@ def validate_records(records_by_table: dict[str, list[dict[str, Any]]]) -> dict[
             "duplicate_ids": duplicate_ids,
             "batch_relationships_valid": invalid_batch_ids == 0,
             "invalid_batch_relationships": invalid_batch_ids,
+            "null_batch_ids": null_batch_ids,
+            "null_batch_id_policy": "allowed for farm-level expenses" if table == "expenses" else "not applicable",
             "records": len(records),
         }
         results[table] = table_result
@@ -277,10 +284,15 @@ def validate_records(records_by_table: dict[str, list[dict[str, Any]]]) -> dict[
     if duplicate_codes:
         failures.append("pig_batches: duplicate batch_code values detected")
 
+    warnings = [
+        f"expenses: {results['expenses']['null_batch_ids']} farm-level record(s) have no batch_id"
+    ] if results["expenses"]["null_batch_ids"] else []
+
     return {
-        "status": "PASS" if not failures else "FAIL",
+        "status": "FAIL" if failures else "WARNING" if warnings else "PASS",
         "passed": not failures,
         "failures": failures,
+        "warnings": warnings,
         "tables": results,
     }
 
@@ -354,6 +366,11 @@ def run(args: argparse.Namespace) -> int:
                 and validation["tables"].get(table_log["table_name"], {}).get("batch_relationships_valid", True)
                 else "FAIL"
             )
+            if (
+                table_log["validation_result"] == "PASS"
+                and validation["tables"].get(table_log["table_name"], {}).get("null_batch_ids", 0)
+            ):
+                table_log["validation_result"] = "WARNING"
         if not validation["passed"]:
             raise ExtractionError("Validation failed: " + "; ".join(validation["failures"]))
 
