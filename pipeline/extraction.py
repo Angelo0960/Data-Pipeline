@@ -16,6 +16,7 @@ import argparse
 import csv
 import json
 import os
+import shlex
 import sys
 import time
 import uuid
@@ -114,6 +115,32 @@ def require_environment() -> tuple[str, str]:
             "Missing required environment variable(s): " + ", ".join(missing)
         )
     return base_url, api_key
+
+
+def load_dotenv_file() -> None:
+    """Load a local .env file without overwriting existing environment values."""
+    candidates = [
+        Path.cwd() / ".env",
+        Path(__file__).resolve().parent.parent / ".env",
+        Path(__file__).resolve().parent / ".env",
+    ]
+    env_path = next((candidate for candidate in candidates if candidate.is_file()), None)
+    if env_path is None:
+        return
+
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, raw_value = line.split("=", 1)
+        key = key.strip()
+        if not key or key in os.environ:
+            continue
+        try:
+            parsed = shlex.split(raw_value.strip(), comments=True)
+            os.environ[key] = parsed[0] if parsed else ""
+        except ValueError as exc:
+            raise ExtractionError(f"Invalid .env value for {key}: {exc}") from exc
 
 
 def read_json(path: Path, default: Any) -> Any:
@@ -375,6 +402,7 @@ def run(args: argparse.Namespace) -> int:
 
 
 def main() -> int:
+    load_dotenv_file()
     parser = build_parser()
     return run(parser.parse_args())
 
