@@ -354,6 +354,170 @@ This stage validates the reliability and completeness of the **extraction proces
 Data cleaning, standardization, business-rule validation, calculations, aggregation, and analytical transformations are not performed during Extraction. These operations are handled in the **Transformation Stage**.
 
 
+## 4. Extraction Metadata and Log Specification
+
+The extraction process produces one metadata and log record for every scheduled pipeline run. The run log connects the extraction window, source table, validation results, record counts, and final handover decision so that each extracted dataset can be traced from the PrepAPig operational database to the next pipeline stage.
+
+### 4.1 Extraction Metadata Specification
+
+| Metadata Field | Purpose | Example / Format |
+|---|---|---|
+| `pipeline_run_id` | Uniquely identifies each execution of the extraction pipeline. | `PREPAPIG_20261004_230000` |
+| `table_name` | Identifies the Supabase table being extracted. | `feed_records` |
+| `extraction_start` | Records the date and time when extraction of the table started. | `2026-10-04 23:00:00` |
+| `extraction_end` | Records the date and time when extraction of the table finished. | `2026-10-04 23:00:03` |
+| `extraction_status` | Indicates whether the extraction operation completed successfully. | `SUCCESS`, `WARNING`, or `FAILED` |
+| `records_read` | Number of records returned from the Supabase REST API for the extraction window. | `25` |
+| `records_extracted` | Number of records successfully included in the extraction output. | `25` |
+| `records_rejected` | Number of records rejected because of critical extraction-level validation failures, if applicable. | `0` |
+| `window_start` | Previous successful extraction timestamp used as the lower boundary of the incremental extraction. | `2026-10-03 23:00:00` |
+| `window_end` | Current extraction timestamp used as the upper boundary of the incremental extraction. | `2026-10-04 23:00:00` |
+| `validation_result` | Overall validation result for the extracted table. | `PASS`, `WARNING`, or `FAIL` |
+| `error_message` | Records an error encountered during extraction. Remains empty when no error occurs. | `HTTP 401: Unauthorized` or empty |
+| `extraction_duration` | Total time required to complete the extraction operation. | `3 seconds` |
+
+### 4.2 How Metadata and Logs Connect to the Extraction Process
+
+1. Node.js Cron starts the Python ETL script and the script creates a unique `pipeline_run_id`.
+2. The script records `extraction_start` and uses it as the fixed `window_end` for the current extraction run.
+3. For each Supabase table, the script reads the previous successful watermark into `window_start` and extracts records where `created_at` satisfies:
+
+   ```text
+   window_start < created_at <= window_end
+   ```
+
+4. The table-level log records `table_name`, `records_read`, `records_extracted`, and `records_rejected`.
+5. The script records `validation_result` for source accessibility, required tables and columns, required identifiers, record counts, and extraction errors.
+6. The script records `extraction_end` after extraction and validation finish, then calculates `extraction_duration` from `extraction_start` to `extraction_end`.
+7. If all critical checks pass, `extraction_status` is `SUCCESS` and `validation_result` is `PASS`. The new successful timestamp is saved as the next `window_start` only after the extracted dataset is accepted.
+8. If a critical check fails, `extraction_status` is `FAILED` and `validation_result` is `FAIL`. The `error_message` records the cause, the current window is not marked successful, and the next scheduled run retries the unprocessed window.
+9. If only non-critical issues occur, `extraction_status` is `WARNING` and `validation_result` is `WARNING`. The affected records are counted in `records_rejected` and the handover is held for review according to the acceptance rules.
+
+### 4.3 Monitoring, Troubleshooting, Auditing, and Recovery
+
+- **Monitoring:** Operators use status, duration, record counts, validation results, and window boundaries to confirm that the daily extraction completed and that the volume is reasonable.
+- **Troubleshooting:** The `pipeline_run_id`, `table_name`, timestamps, error message, and extraction window identify the affected run and table without requiring the entire source query to be repeated.
+- **Auditing:** The log preserves what was extracted, when it was extracted, which Supabase table was used, which validation result was produced, and whether the output was accepted for the next stage.
+- **Recovery:** A failed run does not advance the successful watermark. The next run reuses the last successful `window_start`, allowing the missed window to be retried without silently losing records.
+
+### 4.4 Log Record Relationship
+
+Each scheduled run has one run-level record and one table-level record for every source table processed:
+
+```text
+pipeline_run_id
+    ├── pig_batches log
+    ├── feed_records log
+    ├── vaccination_records log
+    └── expenses log
+```
+
+This structure keeps the logs connected to the incremental extraction method and provides a complete handover package: the extracted data, the extraction window, record counts, validation results, status, and any errors.
+>>>>>>> 1b1349cac123455a0155f564f8d143d58e42c6a4
+
+
+## 5. Log Retention and Access
+
+The PrepAPig Batch Data Pipeline maintains extraction logs to monitor daily ETL execution, investigate extraction failures, verify data quality checks, support auditing, and recover unsuccessful extraction runs. Log management follows a defined retention policy to ensure that operational information and audit records remain available for the required period.
+
+The logs contain the pipeline run ID, source table name, extraction timestamps, extraction status, record counts, validation results, extraction window, error messages, and execution duration, as defined in Section 4.
+
+### 5.1 Log Retention Period and Justification
+
+The pipeline uses separate retention periods for operational logs and audit records. The following periods are proposed for the project to support routine monitoring, troubleshooting, auditing, and recovery.
+
+| Log Type | Retention Period | Justification |
+|---|---|---|
+| Operational extraction logs | 90 days | Provides sufficient history to investigate daily extraction failures, API connection problems, validation errors, and unexpected record counts. |
+| Audit records and extraction metadata | 1 year | Preserves the history of extraction activities, validation results, extraction windows, and handover decisions for auditing and traceability. |
+| Failed extraction logs | At least 90 days, or until the issue is resolved, whichever is later | Ensures that errors remain available for troubleshooting and that unresolved extraction failures can be investigated. |
+| Recovery-related logs | Until recovery is completed and verified, subject to the applicable retention period | Preserves the information required to identify the failed extraction window and confirm successful reprocessing. |
+
+The retention period begins from the date and time the log record is created. Logs must not be deleted before their applicable retention period expires. If a log is still needed for troubleshooting, auditing, investigation, or recovery, its retention must be extended until the need has ended.
+
+### 5.2 Log Storage Location
+
+Extraction logs are stored separately from the extracted farming datasets to make log management, access control, and retention easier to maintain.
+
+The proposed storage arrangement is as follows:
+
+| Storage Component | Purpose |
+|---|---|
+| Dedicated extraction log directory on the ETL host | Stores operational log files generated by the Python extraction script. |
+| Restricted metadata and audit storage | Preserves run-level and table-level extraction metadata, validation results, record counts, statuses, and error information for long-term traceability. |
+| Secured backup or archive storage | Holds retained copies of important audit records and logs required for recovery or historical reference. |
+
+A suggested directory structure for the Python ETL project is:
+
+```text
+PrepAPig-ETL/
+├── logs/
+│   └── extraction/
+│       ├── operational/
+│       ├── audit/
+│       └── archive/
+├── output/
+│   └── extracted_data/
+└── extraction.py
+```
+
+The `operational` directory contains routine extraction logs, the `audit` directory contains records retained for audit and traceability, and the `archive` directory contains logs moved out of active storage after the applicable archival procedure.
+
+If PostgreSQL is used for structured metadata and audit storage, the records should be maintained in a dedicated logging or metadata table, separate from the processed farming data.
+
+The directory structure and storage arrangements described above are proposed configurations and must be implemented in the ETL environment. Log files must not be stored in publicly accessible locations or committed to a public source-code repository.
+
+### 5.3 Access Permissions
+
+Access to extraction logs must be restricted to authorized personnel and system processes according to their responsibilities.
+
+| Role | Access Permission | Responsibility |
+|---|---|---|
+| Python ETL process account | Write access to the required log locations | Generates extraction logs and records run metadata, validation results, and errors. |
+| Authorized developer or ETL operator | Read access to operational logs and relevant audit records | Monitors scheduled runs, investigates failures, and verifies extraction results. |
+| Project administrator | Administrative access to log storage and retention settings | Manages permissions, storage capacity, archival procedures, and authorized deletion. |
+| Unauthorized users | No access | Prevents unauthorized viewing, modification, or deletion of log records. |
+
+Log access must follow the principle of least privilege. Only personnel who require access for pipeline operation, maintenance, or auditing should be granted the necessary permissions.
+
+The Python ETL process should have only the permissions needed to create and update its designated logs. Routine users should not be allowed to modify or delete historical audit records. Database credentials, API keys, access tokens, passwords, and other secrets must not be written to log files.
+
+### 5.4 Archiving Requirements
+
+Logs that are no longer required for routine monitoring but must be retained for auditing or historical reference should be archived according to the proposed retention policy.
+
+The archiving procedure follows these requirements:
+
+1. Operational logs approaching the end of their active retention period are reviewed to determine whether they are still needed for troubleshooting, auditing, or recovery.
+2. Logs required for longer-term traceability are transferred to the designated restricted archive or audit storage.
+3. Archived logs must retain their original timestamps, pipeline run IDs, table names, extraction statuses, and relevant validation information.
+4. Archived files must be protected against unauthorized modification and deletion.
+5. Archive copies must be checked for completeness and readability after transfer.
+6. Archive storage must be monitored to ensure that sufficient capacity remains available.
+7. Logs associated with unresolved failures or ongoing investigations must remain accessible until the related issue is resolved.
+
+Archiving does not mean that the original retention requirements are automatically satisfied or that the records can be deleted immediately. Archived logs remain subject to their applicable retention period and any outstanding troubleshooting, auditing, or recovery requirements.
+
+### 5.5 Deletion Rules and Responsible Process
+
+Log deletion must follow a controlled process to prevent the loss of information required for operational monitoring, auditing, or recovery.
+
+The deletion procedure is as follows:
+
+1. The project administrator or authorized ETL operator reviews logs that have reached the end of their applicable retention period.
+2. The reviewer checks whether the logs are associated with unresolved extraction failures, pending investigations, audit requirements, or incomplete recovery activities.
+3. Logs that remain necessary are retained, even if their normal retention period has expired.
+4. Logs that have passed their retention period and are no longer required may be deleted through an authorized cleanup procedure.
+5. The deletion process must not remove the current successful-extraction watermark, necessary recovery information, or records required to establish extraction history.
+6. The responsible administrator records the deletion activity, including the deletion date, log period covered, and reason for deletion, where feasible.
+7. The deletion procedure is reviewed periodically to confirm that it follows the approved retention policy.
+
+A scheduled cleanup task may be configured to identify expired operational logs and remove eligible files. However, automated cleanup must enforce the retention period and check for applicable retention holds before deleting any records.
+
+**Mandatory deletion rule:** Logs must not be deleted before the defined retention period has expired or while they are still needed for troubleshooting, auditing, investigation, or recovery. If any of these conditions apply, deletion must be postponed until the logs are no longer required.
+
+
+
 
 <<<<<<< HEAD
 
@@ -469,63 +633,3 @@ expense_type
 expense_date
 created_at
 =======
-## 4. Extraction Metadata and Log Specification
-
-The extraction process produces one metadata and log record for every scheduled pipeline run. The run log connects the extraction window, source table, validation results, record counts, and final handover decision so that each extracted dataset can be traced from the PrepAPig operational database to the next pipeline stage.
-
-### 4.1 Extraction Metadata Specification
-
-| Metadata Field | Purpose | Example / Format |
-|---|---|---|
-| `pipeline_run_id` | Uniquely identifies each execution of the extraction pipeline. | `PREPAPIG_20261004_230000` |
-| `table_name` | Identifies the Supabase table being extracted. | `feed_records` |
-| `extraction_start` | Records the date and time when extraction of the table started. | `2026-10-04 23:00:00` |
-| `extraction_end` | Records the date and time when extraction of the table finished. | `2026-10-04 23:00:03` |
-| `extraction_status` | Indicates whether the extraction operation completed successfully. | `SUCCESS`, `WARNING`, or `FAILED` |
-| `records_read` | Number of records returned from the Supabase REST API for the extraction window. | `25` |
-| `records_extracted` | Number of records successfully included in the extraction output. | `25` |
-| `records_rejected` | Number of records rejected because of critical extraction-level validation failures, if applicable. | `0` |
-| `window_start` | Previous successful extraction timestamp used as the lower boundary of the incremental extraction. | `2026-10-03 23:00:00` |
-| `window_end` | Current extraction timestamp used as the upper boundary of the incremental extraction. | `2026-10-04 23:00:00` |
-| `validation_result` | Overall validation result for the extracted table. | `PASS`, `WARNING`, or `FAIL` |
-| `error_message` | Records an error encountered during extraction. Remains empty when no error occurs. | `HTTP 401: Unauthorized` or empty |
-| `extraction_duration` | Total time required to complete the extraction operation. | `3 seconds` |
-
-### 4.2 How Metadata and Logs Connect to the Extraction Process
-
-1. Node.js Cron starts the Python ETL script and the script creates a unique `pipeline_run_id`.
-2. The script records `extraction_start` and uses it as the fixed `window_end` for the current extraction run.
-3. For each Supabase table, the script reads the previous successful watermark into `window_start` and extracts records where `created_at` satisfies:
-
-   ```text
-   window_start < created_at <= window_end
-   ```
-
-4. The table-level log records `table_name`, `records_read`, `records_extracted`, and `records_rejected`.
-5. The script records `validation_result` for source accessibility, required tables and columns, required identifiers, record counts, and extraction errors.
-6. The script records `extraction_end` after extraction and validation finish, then calculates `extraction_duration` from `extraction_start` to `extraction_end`.
-7. If all critical checks pass, `extraction_status` is `SUCCESS` and `validation_result` is `PASS`. The new successful timestamp is saved as the next `window_start` only after the extracted dataset is accepted.
-8. If a critical check fails, `extraction_status` is `FAILED` and `validation_result` is `FAIL`. The `error_message` records the cause, the current window is not marked successful, and the next scheduled run retries the unprocessed window.
-9. If only non-critical issues occur, `extraction_status` is `WARNING` and `validation_result` is `WARNING`. The affected records are counted in `records_rejected` and the handover is held for review according to the acceptance rules.
-
-### 4.3 Monitoring, Troubleshooting, Auditing, and Recovery
-
-- **Monitoring:** Operators use status, duration, record counts, validation results, and window boundaries to confirm that the daily extraction completed and that the volume is reasonable.
-- **Troubleshooting:** The `pipeline_run_id`, `table_name`, timestamps, error message, and extraction window identify the affected run and table without requiring the entire source query to be repeated.
-- **Auditing:** The log preserves what was extracted, when it was extracted, which Supabase table was used, which validation result was produced, and whether the output was accepted for the next stage.
-- **Recovery:** A failed run does not advance the successful watermark. The next run reuses the last successful `window_start`, allowing the missed window to be retried without silently losing records.
-
-### 4.4 Log Record Relationship
-
-Each scheduled run has one run-level record and one table-level record for every source table processed:
-
-```text
-pipeline_run_id
-    ├── pig_batches log
-    ├── feed_records log
-    ├── vaccination_records log
-    └── expenses log
-```
-
-This structure keeps the logs connected to the incremental extraction method and provides a complete handover package: the extracted data, the extraction window, record counts, validation results, status, and any errors.
->>>>>>> 1b1349cac123455a0155f564f8d143d58e42c6a4
