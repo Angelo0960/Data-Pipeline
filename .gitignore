@@ -8,6 +8,6 @@ __pycache__/
 !.env.example
 
 # Generated extraction outputs
-data/raw/
-data/metadata/*.json
-data/logs/
+**/data/raw/
+**/data/metadata/
+**/data/logs/

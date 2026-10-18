@@ -413,7 +413,6 @@ pipeline_run_id
 ```
 
 This structure keeps the logs connected to the incremental extraction method and provides a complete handover package: the extracted data, the extraction window, record counts, validation results, status, and any errors.
->>>>>>> 1b1349cac123455a0155f564f8d143d58e42c6a4
 
 
 ## 5. Log Retention and Access
@@ -519,7 +518,6 @@ A scheduled cleanup task may be configured to identify expired operational logs 
 
 
 
-<<<<<<< HEAD
 
 ## 6. Extraction Data Contract and Naming Convention
 
@@ -632,7 +630,7 @@ next_due_date
 expense_type
 expense_date
 created_at
-=======
+
 
 ```
 ## 7. Extraction Acceptance and Handover Rules
