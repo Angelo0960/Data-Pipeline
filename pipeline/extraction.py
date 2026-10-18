@@ -161,6 +161,29 @@ def write_json(path: Path, value: Any) -> None:
     temporary.replace(path)
 
 
+def append_jsonl(path: Path, record: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def write_extraction_logs(output_dir: Path, metadata: dict[str, Any]) -> None:
+    """Write one operational event and one immutable audit record per run."""
+    logs_dir = output_dir / "logs" / "extraction"
+    operational_path = logs_dir / "operational" / (
+        f"extraction_{metadata['extraction_start'][:10]}.jsonl"
+    )
+    audit_path = logs_dir / "audit" / f"{metadata['pipeline_run_id']}.json"
+    event = {
+        "event": "extraction_finished",
+        "status": metadata["extraction_status"],
+        "logged_at": iso_timestamp(utc_now()),
+        **metadata,
+    }
+    append_jsonl(operational_path, event)
+    write_json(audit_path, metadata)
+
+
 def build_query(table: str, window_start: datetime | None, window_end: datetime) -> str:
     params: list[tuple[str, str]] = [("select", "*")]
     if window_start is not None:
@@ -333,6 +356,7 @@ def run(args: argparse.Namespace) -> int:
         "extraction_start": iso_timestamp(started_at),
         "extraction_end": None,
         "extraction_status": "FAILED",
+        "validation_result": "FAIL",
         "window_start": iso_timestamp(window_start) if window_start else None,
         "window_end": iso_timestamp(window_end),
         "tables": [],
@@ -345,11 +369,15 @@ def run(args: argparse.Namespace) -> int:
         window_start = None if args.full else load_watermark(watermark_path)
         metadata["window_start"] = iso_timestamp(window_start) if window_start else None
         for table in TABLES:
+            table_started_at = utc_now()
             table_started = time.perf_counter()
             records = extract_table(base_url, api_key, table, window_start, window_end, args.timeout)
             table_results[table] = records
+            table_finished_at = utc_now()
             metadata["tables"].append({
                 "table_name": table,
+                "extraction_start": iso_timestamp(table_started_at),
+                "extraction_end": iso_timestamp(table_finished_at),
                 "records_read": len(records),
                 "records_extracted": len(records),
                 "records_rejected": 0,
@@ -358,6 +386,8 @@ def run(args: argparse.Namespace) -> int:
 
         validation = validate_records(table_results)
         metadata["validation"] = validation
+        metadata["validation_result"] = validation["status"]
+        metadata["extraction_status"] = "WARNING" if validation["warnings"] else "SUCCESS"
         for table_log in metadata["tables"]:
             table_log["validation_result"] = (
                 "PASS" if validation["tables"].get(table_log["table_name"], {}).get("required_columns_present", False)
@@ -385,6 +415,7 @@ def run(args: argparse.Namespace) -> int:
         )
         metadata_path = output_dir / "metadata" / f"{run_id}.json"
         write_json(metadata_path, metadata)
+        write_extraction_logs(output_dir, metadata)
         write_json(
             watermark_path,
             {
@@ -405,6 +436,7 @@ def run(args: argparse.Namespace) -> int:
             (utc_now() - started_at).total_seconds(), 3
         )
         write_json(output_dir / "metadata" / f"{run_id}.json", metadata)
+        write_extraction_logs(output_dir, metadata)
         print(f"Extraction failed: {exc}", file=sys.stderr)
         return 1
     except OSError as exc:
@@ -414,6 +446,7 @@ def run(args: argparse.Namespace) -> int:
             (utc_now() - started_at).total_seconds(), 3
         )
         write_json(output_dir / "metadata" / f"{run_id}.json", metadata)
+        write_extraction_logs(output_dir, metadata)
         print(f"Extraction failed: {exc}", file=sys.stderr)
         return 1
 

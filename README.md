@@ -59,3 +59,7 @@ PrepAPig operational database
 ```
 
 The pipeline runs on a predefined batch schedule and depends on the PrepAPig operational database, the Python environment, Node.js Cron, the PostgreSQL database, configuration settings, and valid application data.
+
+## Extraction run logging
+
+Each run creates a unique `pipeline_run_id` and records one final status: `SUCCESS`, `WARNING`, or `FAILED`. Run metadata, operational JSONL events, and audit records are written under the configured output directory. Retention rules are documented in [`docs/extraction/retention.md`](docs/extraction/retention.md).
