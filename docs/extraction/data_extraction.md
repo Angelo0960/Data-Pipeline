@@ -733,3 +733,90 @@ When all required tables pass validation, the extracted datasets may proceed to 
 
 ---
 
+
+
+## 8. Common Extraction Problems and Mitigation
+
+During the extraction stage of the PrepAPig Farm Management System, several problems may occur when retrieving and packaging data from the Supabase PostgreSQL database. Since the extraction process uses incremental extraction based on the `created_at` field and is executed through a Python ETL script scheduled by Node.js Cron, extraction problems must be detected and handled before the data is handed over to the Transformation stage.
+
+The following table identifies realistic extraction problems, their possible causes, their impact on the extraction process, and the proposed mitigation.
+
+| Extraction Problem | Possible Cause | Impact on Extraction Process | Proposed Solution / Mitigation |
+|---|---|---|---|
+| **Supabase database or API is unavailable** | Temporary service interruption, database downtime, network problem, or Supabase service issue. | The Python ETL script cannot retrieve records, resulting in a failed or incomplete extraction. | Retry the extraction after a short interval. If the problem persists, mark the extraction run as **FAILED**, retain the previous successful watermark, and retry the same extraction window during the next scheduled run. |
+| **Authentication or database connection failure** | Invalid credentials, expired connection configuration, incorrect database/API settings, or unavailable connection. | The extraction script cannot access the required PrepAPig tables. No valid dataset can be produced. | Verify the configured connection and access permissions. Credentials must be stored securely and must not be written to logs. Mark the run as **FAILED** until a valid connection is restored. |
+| **Required table is missing or inaccessible** | Source schema changed, table was renamed/deleted, or the ETL account no longer has sufficient permissions. | The affected table cannot be extracted, causing the extracted dataset to be incomplete. | Check that `pig_batches`, `feed_records`, `vaccination_records`, and `expenses` exist and are accessible. Stop or reject the extraction if a required table cannot be retrieved. Investigate the source schema before rerunning. |
+| **Required column is missing or changed** | Source database schema was modified without updating the extraction process. | The Python ETL script may fail or produce incomplete records because required fields cannot be retrieved. | Validate required columns before extraction. If a required column is missing, mark the run as **FAILED** and update the extraction script only after confirming the approved source schema. |
+| **Invalid or missing `created_at` values** | Source records contain null, malformed, or unexpected timestamp values. | Incremental extraction may skip records or extract records outside the intended window, resulting in missing or duplicated data across runs. | Validate the `created_at` field before applying the incremental filter. Records that cannot be reliably evaluated should not be silently included or excluded. Flag the issue for review and retain the previous watermark when the extraction cannot be trusted. |
+| **Incorrect incremental extraction window** | Incorrect watermark, incorrect comparison operators, timestamp conversion problems, or failure to use the fixed extraction timestamp for the current run. | Records may be duplicated, skipped, or extracted more than once across consecutive runs. | Use the defined window: `last_successful_extraction_timestamp < created_at <= current_extraction_timestamp`. Capture `current_extraction_timestamp` once at the beginning of the run and only update the watermark after successful validation and handover. |
+| **Duplicate primary keys detected** | Duplicate source records, source integrity problems, or an extraction/query error. | Duplicate records may cause the extracted dataset to violate the expected source structure and may affect downstream relationships. | Validate primary key uniqueness after extraction. Mark the validation as **FAIL** for critical duplicate-key violations and do not approve the dataset for Transformation until the issue is investigated. |
+| **Missing primary key or `batch_id` values** | Incomplete source records or source data integrity problems. | Records cannot be reliably identified or associated with their corresponding pig batch. This can affect downstream relationships and validation. | Check required identifiers during extraction validation. Flag invalid records and prevent approval when the missing identifier affects a critical relationship. |
+| **Invalid foreign-key relationship** | A `feed_records`, `vaccination_records`, or `expenses` record references a `batch_id` that does not exist in `pig_batches`. | The extracted data may contain orphan records that cannot be reliably related to a pig batch during Transformation. | Validate foreign-key relationships before handover. Record the affected rows in the validation results and classify the extraction as **WARNING**, **MANUAL REVIEW**, or **REJECTED** depending on the severity and number of affected records. |
+| **Incomplete results due to API pagination or query limits** | The Supabase API or extraction query returns only part of the requested records because of pagination or result-size limits. | The extracted dataset contains fewer records than the source for the specified extraction window, causing incomplete data handover. | Implement pagination or appropriate query handling in the Python ETL script. Compare extracted record counts with the expected query results and do not approve the extraction when completeness cannot be confirmed. |
+| **Network interruption during extraction** | Unstable internet connection, temporary network failure, or connection timeout. | The extraction may stop partway through, producing incomplete output or an unsuccessful run. | Use controlled retry handling for temporary connection failures. If the extraction cannot be completed, mark the run as **FAILED**, discard incomplete output, retain the previous watermark, and retry the same window on the next run. |
+| **Python ETL script terminates unexpectedly** | Programming error, unhandled exception, insufficient system resources, or unexpected source data. | The extraction may stop before all required tables are processed, resulting in incomplete output. | Capture exceptions and write an error message to the extraction log without exposing credentials or sensitive connection information. Mark the run as **FAILED** and investigate the error before approving the output. |
+| **Extracted CSV file cannot be created or written** | Incorrect output path, insufficient permissions, unavailable storage, or file-system error. | Data may be successfully retrieved from Supabase but cannot be packaged for handover to Transformation. | Validate the output directory before extraction and verify that the CSV file is successfully written. If the output cannot be created, mark the run as **FAILED** and do not advance the watermark. |
+| **CSV output is incomplete or truncated** | ETL interruption during file writing, unexpected termination, or storage problem. | The output file may contain fewer records than were successfully retrieved, resulting in incomplete handover. | Verify the output file after writing, including record counts and file existence. Incomplete files must not be handed over or used for Transformation. Re-run the extraction using the unchanged watermark. |
+| **Node.js Cron does not trigger the extraction script** | Scheduler configuration error, server restart, incorrect script path, permission problem, or Cron service failure. | The daily extraction does not occur, causing the source data to remain unextracted for the expected period. | Monitor scheduled runs using extraction logs and run metadata. Check the Cron configuration and Python script path. A missed run should be executed using the appropriate previous successful watermark so that no extraction window is skipped. |
+| **Multiple extraction runs execute at the same time** | Cron starts a new run before the previous run has completed, or the extraction script is manually executed while a scheduled run is active. | Concurrent runs may produce duplicate output, conflicting metadata, or inconsistent watermark updates. | Use a run-control mechanism such as a lock file or process check to allow only one extraction run at a time. A new run should wait or terminate safely when another extraction is already in progress. |
+| **Timezone mismatch in timestamps** | Database timestamps, server time, or ETL environment use different timezone settings. | Records may be incorrectly included or excluded from the incremental extraction window. | Use a consistent timestamp standard for the extraction process and ensure that `created_at`, the watermark, and the current extraction timestamp are compared using the same timezone convention. |
+| **Unexpected increase or decrease in extracted record count** | Source system activity changed, failed query, incomplete extraction, duplicate records, or unexpected source data changes. | A significantly abnormal record count may indicate an incomplete or incorrect extraction. | Compare the current record count with previous extraction runs. Generate a **WARNING** when the count is unusual and require manual review when the difference suggests possible extraction failure. |
+| **Empty extraction result** | No new records were created during the extraction window, incorrect extraction window, or source/query problem. | An empty result may be valid, but it may also indicate that the incremental filter is incorrect. | Treat an empty result as valid only when the extraction query and source connection are successfully validated. Record the run metadata and extraction window so the result can be distinguished from a failed extraction. |
+| **Source schema changes without notification** | New columns, renamed columns, removed fields, or changed data types in the PrepAPig database. | The extraction script may fail or produce data that no longer matches the expected extraction structure. | Perform schema validation before extraction. Any incompatible schema change should cause the affected extraction to enter **FAIL** or **MANUAL REVIEW** status until the extraction process and data contract are updated. |
+| **Secrets or credentials appear in extraction logs** | Debug logging, exception messages, or connection strings are written directly to operational logs. | Sensitive information may be exposed and create a security risk. | Never write passwords, API keys, access tokens, or complete connection strings to logs. Log only the error type, affected process, timestamp, and safe diagnostic information. |
+| **Watermark is updated after an unsuccessful extraction** | Watermark is saved before validation or before the extracted dataset is successfully packaged. | The next extraction may start after records that were never successfully handed over, causing permanent data loss. | Update the watermark only after extraction, validation, output packaging, and successful handover have completed. Failed runs must retain the previous successful watermark. |
+
+### 8.1 Extraction Failure Handling
+
+The extraction process follows a controlled failure-handling approach. When an extraction problem occurs, the ETL process records the problem in the extraction metadata and logs. The extraction status is then classified according to the validation results.
+
+- **PASS** – The extraction completed successfully and the extracted dataset passed the required validation checks.
+- **WARNING** – The extraction completed, but a non-critical issue requires monitoring or manual review.
+- **FAIL** – A critical problem prevents the extracted dataset from being considered reliable.
+- **MANUAL REVIEW** – The extraction does not contain a critical failure but requires an authorized team member to verify the result before handover.
+
+For critical extraction failures, the previous successful watermark is retained. This allows the next scheduled run to retry the same extraction window instead of skipping records that were not successfully extracted.
+
+### 8.2 Retry and Recovery
+
+Temporary problems such as network interruptions, temporary Supabase unavailability, or connection timeouts may be retried. However, repeated failures should not automatically be treated as successful extraction.
+
+The recovery process is:
+
+1. Start the scheduled extraction.
+2. Capture the current extraction timestamp.
+3. Retrieve records using the previous successful watermark.
+4. Validate the extracted records and output.
+5. If validation passes, package the dataset and update the watermark.
+6. If a critical failure occurs, mark the run as **FAILED** and retain the previous watermark.
+7. Retry the same extraction window during the next scheduled run after the underlying problem has been resolved.
+
+This approach prevents records from being skipped when an extraction run fails.
+
+### 8.3 Monitoring and Maintenance
+
+The extraction logs and run metadata should be monitored for repeated problems such as connection failures, abnormal record counts, missed Cron executions, schema changes, and validation failures. Repeated failures should be investigated rather than continuously retried without identifying the underlying cause.
+
+The following information should be available for troubleshooting:
+
+- `pipeline_run_id`
+- `table_name`
+- `extraction_start`
+- `extraction_end`
+- `extraction_status`
+- `records_read`
+- `records_extracted`
+- `records_rejected`
+- `window_start`
+- `window_end`
+- `validation_result`
+- `error_message`
+- `extraction_duration`
+
+These records allow team members to determine what happened during an extraction run, identify whether data was successfully extracted, and determine whether the dataset is safe to hand over to Transformation.
+
+### 8.4 Scope of Mitigation
+
+The mitigation activities described in this section are limited to problems affecting the **extraction and packaging of source data**. They do not include data cleaning, standardization, business-rule calculations, aggregation, or other transformations.
+
+Once the extracted dataset has successfully passed the required extraction validations and has been packaged with its corresponding metadata, it can be handed over to the **Transformation stage**. Any cleaning, standardization, or business transformation required by the project should be performed during that subsequent stage.
