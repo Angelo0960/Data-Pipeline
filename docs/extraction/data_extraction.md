@@ -633,3 +633,105 @@ expense_type
 expense_date
 created_at
 =======
+
+```
+## 7. Extraction Acceptance and Handover Rules
+
+The PrepAPig data pipeline establishes acceptance and handover rules to determine whether data extracted from the Supabase project `it332-capstone-PrePApig` is suitable for the Transformation Stage.
+
+These rules apply to the `pig_batches`, `feed_records`, `vaccination_records`, and `expenses` tables.
+
+The extraction process uses the validation results defined in Section 3 and the extraction metadata recorded in Section 4 to determine whether the extracted datasets should be automatically approved, held for manual review, or rejected.
+
+### 7.1 Extraction Acceptance Decision Rules
+
+| Validation Condition | Acceptance Criteria | Pipeline Action | Decision Type | Responsible Role |
+|---|---|---|---|---|
+| All critical validation checks pass | All four tables return PASS with no critical errors. | APPROVED — Proceed to Transformation Stage. | Automatic | Python extraction script |
+| Non-critical validation warning | No critical failures, but an unexpected condition requires investigation. | MANUAL REVIEW — Hold extracted data for verification. | Manual | Data Engineer |
+| Source connection failure | Supabase REST API cannot be accessed. | REJECTED — Stop extraction and retry after resolving the issue. | Automatic | Python extraction script |
+| Required table or column missing | Expected source schema is incomplete. | REJECTED — Stop extraction and investigate schema changes. | Automatic | Python extraction script |
+| Missing or duplicate primary key | One or more records contain missing or duplicate identifiers. | REJECTED — Hold the affected dataset and investigate. | Automatic | Python extraction script |
+| Record count mismatch | Source record count differs from the extracted output count. | REJECTED — Retry or investigate incomplete extraction. | Automatic | Python extraction script |
+| Extraction window mismatch | One or more extracted records fall outside the defined incremental window. | REJECTED — Stop handover and review the extraction query. | Automatic | Python extraction script |
+| Extraction error or interruption | Extraction cannot complete successfully. | REJECTED — Stop, record the error, and retry when appropriate. | Automatic | Python extraction script |
+
+### 7.2 Automatic Approval
+
+The extracted datasets are automatically approved when:
+
+| No. | Automatic Approval Condition |
+|---|---|
+| 1 | All four required Supabase tables are successfully accessed. |
+| 2 | All required columns and identifiers are present. |
+| 3 | Primary keys are unique within their respective datasets. |
+| 4 | Extracted records fall within the defined incremental extraction window. |
+| 5 | Source and output record counts match. |
+| 6 | No critical extraction errors occur. |
+| 7 | All critical validation checks return PASS. |
+
+When these conditions are satisfied, the Python extraction script marks the overall extraction as **_APPROVED_** and allows the validated CSV files to proceed to the Transformation Stage.
+
+### 7.3 Manual Review
+
+Manual review is required when extraction completes without critical errors but produces a non-critical warning.
+
+| No. | Example of Non-Critical Warning |
+|---|---|
+| 1 | An unexpected decrease or increase in the number of extracted records. |
+| 2 | An extraction window containing no new records despite an expectation of new activity. |
+| 3 | A non-critical issue requiring verification of extraction metadata. |
+
+During manual review, the Data Engineer examines the extracted CSV files, validation results, and `extraction_log.csv`.
+
+The dataset remains on hold until the Data Engineer approves or rejects the extraction.
+
+### 7.4 Rejection or Failure
+
+An extraction is rejected when one or more critical validation checks fail.
+
+| No. | Pipeline Requirement |
+|---|---|
+| 1 | Stop the affected dataset from proceeding to the Transformation Stage. |
+| 2 | Record the failure in `logs/extraction_log.csv`. |
+| 3 | Preserve the extraction error and validation results. |
+| 4 | Retry recoverable errors, such as temporary network failures. |
+| 5 | Hold invalid datasets for investigation when necessary. |
+| 6 | Maintain the previous successful extraction checkpoint. |
+
+The checkpoint must not be updated when the overall extraction is rejected.
+
+This allows the next extraction attempt to retrieve records from the last successful extraction window.
+
+### 7.5 Extraction Handover
+
+Once the extraction is approved, the following outputs are prepared for the Transformation Stage.
+
+| Handover Component | Output | Purpose |
+|---|---|---|
+| Pig Batch Data | `pig_batches.csv` | Provides extracted pig batch records. |
+| Feed Records | `feed_records.csv` | Provides extracted feed consumption records. |
+| Vaccination Records | `vaccination_records.csv` | Provides extracted vaccination records. |
+| Expense Records | `expenses.csv` | Provides extracted farm expense records. |
+| Extraction Metadata | `extraction_log.csv` | Provides extraction timestamps, record counts, status, and extraction windows. |
+| Validation Results | Recorded validation results | Confirms whether extraction requirements were satisfied. |
+| Extraction Checkpoint | Last successful extraction timestamp | Supports the next incremental extraction run. |
+
+The CSV files contain raw extracted data. Data cleaning, standardization, aggregation, and business calculations are performed in the Transformation Stage.
+
+### 7.6 Validation Summary Example
+
+| Source Table | Validation Result |
+|---|---|
+| `pig_batches` | PASS |
+| `feed_records` | PASS |
+| `vaccination_records` | PASS |
+| `expenses` | PASS |
+| **_Overall Extraction_** | **_APPROVED_** |
+
+> **This is an illustrative validation summary, not an actual execution result.**
+
+When all required tables pass validation, the extracted datasets may proceed to the Transformation Stage.
+
+---
+
