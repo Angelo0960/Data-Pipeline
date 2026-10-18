@@ -62,4 +62,4 @@ The pipeline runs on a predefined batch schedule and depends on the PrepAPig ope
 
 ## Extraction run logging
 
-Each run creates a unique `pipeline_run_id` and records one final status: `SUCCESS`, `WARNING`, or `FAILED`. Run metadata, operational JSONL events, and audit records are written under the configured output directory. Retention rules are documented in [`docs/extraction/retention.md`](docs/extraction/retention.md).
+Each run creates a unique `pipeline_run_id`, records `SUCCESS`, `WARNING`, or `FAILED`, and produces table-level metadata, validation results, and a handover decision (`APPROVED`, `MANUAL REVIEW`, or `REJECTED`). Operational logs and audit records follow the storage and retention rules in [`docs/extraction/data_extraction.md`](docs/extraction/data_extraction.md).

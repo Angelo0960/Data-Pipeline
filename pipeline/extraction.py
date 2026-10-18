@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import logging
 import os
 import shlex
 import sys
@@ -75,6 +76,141 @@ TABLES = {
 DEFAULT_OUTPUT_DIR = Path("data")
 DEFAULT_PAGE_SIZE = 1000
 DEFAULT_TIMEOUT_SECONDS = 30
+LOG_FILE_NAME = "extraction.log"
+LOG_TITLE = "# PrepAPig Extraction Log"
+LOG_FORMAT = "%(asctime)s %(levelname)-7s [%(run_id)s] %(message)s"
+LOG_DATE_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+
+logger = logging.getLogger("extraction")
+
+
+class RunIdFilter(logging.Filter):
+    """Attach the active pipeline_run_id to every log record."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.run_id = getattr(logger, "run_id", "-")
+        return True
+
+
+def markdown_cell(value: Any) -> str:
+    if value is None:
+        return "-"
+    text = str(value).replace("\r", " ").replace("\n", " ").strip()
+    return text.replace("|", "\\|") or "-"
+
+
+def markdown_table(headers: list[str], rows: list[list[Any]]) -> list[str]:
+    lines = [
+        "| " + " | ".join(headers) + " |",
+        "| " + " | ".join("---" for _ in headers) + " |",
+    ]
+    lines.extend("| " + " | ".join(markdown_cell(value) for value in row) + " |" for row in rows)
+    return lines
+
+
+class MarkdownRunLog:
+    """Append one run's complete record to the single extraction log as markdown tables."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+
+    def write_run(
+        self, metadata: dict[str, Any], mode: str, raw_output_dir: Path | None
+    ) -> None:
+        run_id = metadata["pipeline_run_id"]
+        lines: list[str] = ["", f"## RUN {run_id}", "", "### Run Information", ""]
+        lines += markdown_table(
+            ["Field", "Value"],
+            [
+                ["pipeline_run_id", run_id],
+                ["mode", mode],
+                ["extraction_start", metadata["extraction_start"]],
+                ["extraction_end", metadata["extraction_end"]],
+                ["extraction_duration_seconds", metadata["extraction_duration_seconds"]],
+                ["extraction_status", metadata["extraction_status"]],
+                ["validation_result", metadata["validation_result"]],
+                ["handover_decision", metadata["handover_decision"]],
+                ["window_start", metadata["window_start"]],
+                ["window_end", metadata["window_end"]],
+                ["raw_output", raw_output_dir],
+                ["error_message", metadata["error_message"]],
+            ],
+        )
+
+        lines += ["", "### Table Extraction", ""]
+        lines += markdown_table(
+            [
+                "table_name",
+                "extraction_status",
+                "records_read",
+                "records_extracted",
+                "records_rejected",
+                "extraction_start",
+                "extraction_end",
+                "duration_seconds",
+                "validation_result",
+            ],
+            [
+                [
+                    table_log["table_name"],
+                    table_log["extraction_status"],
+                    table_log["records_read"],
+                    table_log["records_extracted"],
+                    table_log["records_rejected"],
+                    table_log["extraction_start"],
+                    table_log["extraction_end"],
+                    table_log["extraction_duration_seconds"],
+                    table_log["validation_result"],
+                ]
+                for table_log in metadata["tables"]
+            ],
+        )
+
+        lines += ["", "### Validation Findings", ""]
+        validation = metadata["validation"]
+        findings = [["FAIL", failure] for failure in validation["failures"]] if validation else []
+        findings += [["WARNING", warning] for warning in validation["warnings"]] if validation else []
+        if not findings and not metadata["error_message"]:
+            findings = [["PASS", "No validation failures or warnings"]]
+        elif not findings:
+            findings = [
+                ["FAIL", f"Extraction stopped before validation completed: {metadata['error_message']}"]
+            ]
+        lines += markdown_table(["Level", "Finding"], findings)
+        lines += ["", "---", ""]
+
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            is_new = not self.path.exists()
+            with self.path.open("a", encoding="utf-8") as handle:
+                if is_new:
+                    handle.write(f"{LOG_TITLE}\n")
+                handle.write("\n".join(lines) + "\n")
+        except OSError as exc:
+            print(f"Could not write extraction log {self.path}: {exc}", file=sys.stderr)
+
+
+def configure_logging(output_dir: Path, run_id: str, quiet: bool = False) -> Path:
+    """Stream run progress lines to the console and return the single log file path."""
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    if not logger.handlers and not quiet:
+        formatter = logging.Formatter(LOG_FORMAT, datefmt=LOG_DATE_FORMAT)
+        formatter.converter = time.gmtime
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setFormatter(formatter)
+        console_handler.addFilter(RunIdFilter())
+        logger.addHandler(console_handler)
+    logger.run_id = run_id
+    return output_dir / "logs" / "extraction" / "operational" / LOG_FILE_NAME
+
+
+def write_audit_record(output_dir: Path, metadata: dict[str, Any]) -> None:
+    """Persist the complete run metadata in restricted audit storage."""
+    write_json(
+        output_dir / "logs" / "extraction" / "audit" / f"{metadata['pipeline_run_id']}.json",
+        metadata,
+    )
 
 
 class ExtractionError(RuntimeError):
@@ -159,29 +295,6 @@ def write_json(path: Path, value: Any) -> None:
         json.dumps(value, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
     temporary.replace(path)
-
-
-def append_jsonl(path: Path, record: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
-
-
-def write_extraction_logs(output_dir: Path, metadata: dict[str, Any]) -> None:
-    """Write one operational event and one immutable audit record per run."""
-    logs_dir = output_dir / "logs" / "extraction"
-    operational_path = logs_dir / "operational" / (
-        f"extraction_{metadata['extraction_start'][:10]}.jsonl"
-    )
-    audit_path = logs_dir / "audit" / f"{metadata['pipeline_run_id']}.json"
-    event = {
-        "event": "extraction_finished",
-        "status": metadata["extraction_status"],
-        "logged_at": iso_timestamp(utc_now()),
-        **metadata,
-    }
-    append_jsonl(operational_path, event)
-    write_json(audit_path, metadata)
 
 
 def build_query(table: str, window_start: datetime | None, window_end: datetime) -> str:
@@ -340,7 +453,27 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--full", action="store_true", help="Ignore the saved watermark and extract all available records.")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR, help="Directory for raw data and metadata.")
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_SECONDS, help="Supabase request timeout in seconds.")
+    parser.add_argument("--quiet", action="store_true", help="Suppress console output. Run tables are still written to the log file.")
     return parser
+
+
+def record_failure(
+    run_log: MarkdownRunLog,
+    output_dir: Path,
+    metadata: dict[str, Any],
+    started_at: datetime,
+    mode: str,
+    message: str,
+) -> None:
+    """Write the failed run's complete record to the extraction log."""
+    metadata["error_message"] = message
+    metadata["extraction_end"] = iso_timestamp(utc_now())
+    metadata["extraction_duration_seconds"] = round(
+        (utc_now() - started_at).total_seconds(), 3
+    )
+    logger.error("Extraction failed: %s", message)
+    run_log.write_run(metadata, mode, None)
+    write_audit_record(output_dir, metadata)
 
 
 def run(args: argparse.Namespace) -> int:
@@ -348,6 +481,9 @@ def run(args: argparse.Namespace) -> int:
     window_end = started_at
     run_id = f"PREPAPIG_{started_at.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
     output_dir: Path = args.output_dir
+    log_path = configure_logging(output_dir, run_id, quiet=args.quiet)
+    run_log = MarkdownRunLog(log_path)
+    mode = "full" if args.full else "incremental"
     watermark_path = output_dir / "metadata" / "watermark.json"
     window_start: datetime | None = None
     table_results: dict[str, list[dict[str, Any]]] = {}
@@ -357,6 +493,7 @@ def run(args: argparse.Namespace) -> int:
         "extraction_end": None,
         "extraction_status": "FAILED",
         "validation_result": "FAIL",
+        "handover_decision": "REJECTED",
         "window_start": iso_timestamp(window_start) if window_start else None,
         "window_end": iso_timestamp(window_end),
         "tables": [],
@@ -364,30 +501,83 @@ def run(args: argparse.Namespace) -> int:
         "error_message": "",
     }
 
+    logger.info(
+        "Extraction started | mode=%s | window_end=%s | output_dir=%s",
+        mode,
+        metadata["window_end"],
+        output_dir,
+    )
+    logger.info("Logging run tables to %s", log_path)
+
     try:
         base_url, api_key = require_environment()
+        logger.info("Supabase source configured at %s", base_url)
         window_start = None if args.full else load_watermark(watermark_path)
         metadata["window_start"] = iso_timestamp(window_start) if window_start else None
+        logger.info("Extraction window start=%s end=%s", metadata["window_start"], metadata["window_end"])
         for table in TABLES:
             table_started_at = utc_now()
             table_started = time.perf_counter()
-            records = extract_table(base_url, api_key, table, window_start, window_end, args.timeout)
-            table_results[table] = records
-            table_finished_at = utc_now()
-            metadata["tables"].append({
+            logger.info("Extracting table %s", table)
+            table_log: dict[str, Any] = {
                 "table_name": table,
                 "extraction_start": iso_timestamp(table_started_at),
-                "extraction_end": iso_timestamp(table_finished_at),
-                "records_read": len(records),
-                "records_extracted": len(records),
+                "extraction_end": None,
+                "records_read": None,
+                "records_extracted": None,
                 "records_rejected": 0,
-                "extraction_duration_seconds": round(time.perf_counter() - table_started, 3),
-            })
+                "extraction_duration_seconds": None,
+                "extraction_status": "IN_PROGRESS",
+                "validation_result": "NOT_EVALUATED",
+            }
+            metadata["tables"].append(table_log)
+            try:
+                records = extract_table(
+                    base_url, api_key, table, window_start, window_end, args.timeout
+                )
+            except Exception:
+                table_log["extraction_end"] = iso_timestamp(utc_now())
+                table_log["extraction_duration_seconds"] = round(
+                    time.perf_counter() - table_started, 3
+                )
+                table_log["extraction_status"] = "FAILED"
+                table_log["validation_result"] = "FAIL"
+                logger.error("Extraction failed for table %s", table)
+                raise
+            table_results[table] = records
+            table_finished_at = utc_now()
+            table_log["extraction_end"] = iso_timestamp(table_finished_at)
+            table_log["records_read"] = len(records)
+            table_log["records_extracted"] = len(records)
+            table_log["extraction_duration_seconds"] = round(
+                time.perf_counter() - table_started, 3
+            )
+            table_log["extraction_status"] = "SUCCESS"
+            logger.info(
+                "Extracted table %s | records_read=%d | duration_seconds=%.3f",
+                table,
+                len(records),
+                table_log["extraction_duration_seconds"],
+            )
 
         validation = validate_records(table_results)
         metadata["validation"] = validation
         metadata["validation_result"] = validation["status"]
-        metadata["extraction_status"] = "WARNING" if validation["warnings"] else "SUCCESS"
+        metadata["extraction_status"] = (
+            "FAILED" if validation["failures"]
+            else "WARNING" if validation["warnings"]
+            else "SUCCESS"
+        )
+        metadata["handover_decision"] = (
+            "REJECTED" if validation["failures"]
+            else "MANUAL REVIEW" if validation["warnings"]
+            else "APPROVED"
+        )
+        for failure in validation["failures"]:
+            logger.error("Validation failure: %s", failure)
+        for warning in validation["warnings"]:
+            logger.warning("Validation warning: %s", warning)
+        logger.info("Validation completed | result=%s", validation["status"])
         for table_log in metadata["tables"]:
             table_log["validation_result"] = (
                 "PASS" if validation["tables"].get(table_log["table_name"], {}).get("required_columns_present", False)
@@ -401,53 +591,55 @@ def run(args: argparse.Namespace) -> int:
                 and validation["tables"].get(table_log["table_name"], {}).get("null_batch_ids", 0)
             ):
                 table_log["validation_result"] = "WARNING"
+            logger.info(
+                "Table %s validation_result=%s",
+                table_log["table_name"],
+                table_log["validation_result"],
+            )
         if not validation["passed"]:
             raise ExtractionError("Validation failed: " + "; ".join(validation["failures"]))
 
         run_raw_dir = output_dir / "raw" / run_id
         for table, records in table_results.items():
             write_csv(run_raw_dir / f"{table}.csv", records, TABLES[table])
+            logger.info(
+                "Wrote %d row(s) to %s", len(records), run_raw_dir / f"{table}.csv"
+            )
 
-        metadata["extraction_status"] = "SUCCESS"
         metadata["extraction_end"] = iso_timestamp(utc_now())
         metadata["extraction_duration_seconds"] = round(
             (utc_now() - started_at).total_seconds(), 3
         )
-        metadata_path = output_dir / "metadata" / f"{run_id}.json"
-        write_json(metadata_path, metadata)
-        write_extraction_logs(output_dir, metadata)
-        write_json(
-            watermark_path,
-            {
-                "last_successful_extraction_timestamp": metadata["window_end"],
-                "pipeline_run_id": run_id,
-            },
+        if metadata["handover_decision"] == "APPROVED":
+            write_json(
+                watermark_path,
+                {
+                    "last_successful_extraction_timestamp": metadata["window_end"],
+                    "pipeline_run_id": run_id,
+                },
+            )
+            logger.info("Watermark advanced to %s", metadata["window_end"])
+        else:
+            logger.warning(
+                "Watermark not advanced; handover decision=%s",
+                metadata["handover_decision"],
+            )
+        logger.info(
+            "Extraction finished | status=%s | duration_seconds=%.3f",
+            metadata["extraction_status"],
+            metadata["extraction_duration_seconds"],
         )
-        print(f"Extraction succeeded: {run_id}")
-        for table in TABLES:
-            print(f"  {table}: {len(table_results[table])} record(s)")
-        print(f"  Raw output: {run_raw_dir}")
-        print(f"  Metadata: {metadata_path}")
+        run_log.write_run(metadata, mode, run_raw_dir)
+        write_audit_record(output_dir, metadata)
         return 0
     except ExtractionError as exc:
-        metadata["error_message"] = str(exc)
-        metadata["extraction_end"] = iso_timestamp(utc_now())
-        metadata["extraction_duration_seconds"] = round(
-            (utc_now() - started_at).total_seconds(), 3
-        )
-        write_json(output_dir / "metadata" / f"{run_id}.json", metadata)
-        write_extraction_logs(output_dir, metadata)
-        print(f"Extraction failed: {exc}", file=sys.stderr)
+        record_failure(run_log, output_dir, metadata, started_at, mode, str(exc))
         return 1
     except OSError as exc:
-        metadata["error_message"] = f"File-system error: {exc}"
-        metadata["extraction_end"] = iso_timestamp(utc_now())
-        metadata["extraction_duration_seconds"] = round(
-            (utc_now() - started_at).total_seconds(), 3
-        )
-        write_json(output_dir / "metadata" / f"{run_id}.json", metadata)
-        write_extraction_logs(output_dir, metadata)
-        print(f"Extraction failed: {exc}", file=sys.stderr)
+        record_failure(run_log, output_dir, metadata, started_at, mode, f"File-system error: {exc}")
+        return 1
+    except Exception as exc:
+        record_failure(run_log, output_dir, metadata, started_at, mode, f"Unexpected error: {exc!r}")
         return 1
 
 
