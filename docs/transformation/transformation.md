@@ -130,7 +130,7 @@ No actual CSV contents or profiling output were included in the supplied referen
 
 ---
 
-## 3. Cleaning Rules
+## 3. Data Cleaning Rules
 
 The following rules define how invalid or inconsistent data will be treated. The team should confirm business-specific thresholds and category mappings before production use.
 
@@ -148,7 +148,7 @@ The following rules define how invalid or inconsistent data will be treated. The
 
 ---
 
-## 4. Standardization Rules
+## 4. Standardization and Data Type Rules
 
 | Rule ID | Field(s) | Standardization rule | Example |
 |---|---|---|---|
@@ -164,7 +164,7 @@ Unknown status values or unrecognized category labels must be flagged for review
 
 ---
 
-## 5. Derived Fields and Aggregation Rules
+## 5. Business Transformation Rules
 
 Derived values are created only after the source fields pass validation. The following are proposed transformations consistent with the pipeline's reporting and analytics purpose.
 
@@ -332,3 +332,216 @@ Before handover, confirm that the output schema is documented, all required vali
 ---
 
 
+## 3. Data Cleaning Rules
+
+### 3.1 Purpose
+
+Data cleaning removes or isolates invalid, incomplete, duplicated, or inconsistent records before they are used for business calculations and reporting. The four datasets covered by this stage are `pig_batches`, `feed_records`, `vaccination_records`, and `expenses`.
+
+Cleaning is performed only on the approved CSV handover received from the Extraction Stage. The original source identifiers are preserved. No record is silently deleted: every rejected or quarantined record is counted and recorded in the data-quality report and transformation log.
+
+A **quarantined record** is excluded from the business-ready output until it has been corrected or approved for use. The quarantine entry records the source file, source record ID when available, rule ID, reason, and transformation run ID.
+
+### 3.2 Cleaning Rule Register
+
+| Rule ID and name | Target | Condition | Action | Justification |
+|---|---|---|---|---|
+| **C-01 — Missing Primary Key** | `id` in all four tables | The primary key is null, blank, or cannot be interpreted as a valid UUID. | Quarantine the affected record. Do not generate a replacement ID. | The source ID is needed to identify and trace each record reliably. |
+| **C-02 — Duplicate Primary Key** | `id` in all four tables | The same ID occurs more than once in a table. | If the rows are exact duplicates (same ID and all field values), retain one copy and log the extra copies. If values conflict for the same ID, hold the affected dataset for investigation; do not choose a record arbitrarily. | Prevents duplicate or conflicting records from being treated as separate facts. |
+| **C-03 — Duplicate Batch Code** | `pig_batches.batch_code` | A batch code is blank after trimming, or two records have the same batch code after trimming. | Trim surrounding whitespace. Quarantine blank values. Hold collisions for review rather than merging batches. | `batch_code` is a unique business identifier in the source schema. |
+| **C-04 — Missing Required Values** | Required columns: `pig_batches.batch_code`, `pig_batches.pig_count`, `feed_records.batch_id`, `feed_records.feed_type`, `feed_records.quantity_kg`, `feed_records.feeding_date`, `vaccination_records.batch_id`, `vaccination_records.vaccine_name`, `vaccination_records.vaccination_date`, `expenses.batch_id`, `expenses.expense_type`, and `expenses.amount` / `expenses.expense_date` | A required value is null or blank. | Quarantine the affected record. Do not fill missing business values with guessed defaults. | Avoids inventing batch, feed, vaccination, or expense information. |
+| **C-05 — Invalid Numeric Values** | `pig_batches.pig_count`, `pig_batches.start_weight`, `pig_batches.current_weight`, `feed_records.quantity_kg`, `expenses.amount` | A value cannot be converted to its expected numeric type, is outside the basic permitted range, or has more precision than the approved output precision. | Require `pig_count` to be a non-negative whole number. Require weights and feed quantity to be non-negative decimals. Quarantine non-numeric or negative values. For `expenses.amount`, quarantine negative values unless the project team approves a documented refund or adjustment rule. Do not silently round excess precision. | Prevents invalid counts, weights, quantities, and expense values from distorting reports. |
+| **C-06 — Whitespace and Invalid Text** | Text fields in all four tables, including `batch_code`, `breed`, `status`, `feed_type`, `vaccine_name`, `administered_by`, `expense_type`, `notes`, and `description` | A text value contains leading or trailing whitespace or consists only of whitespace. | Trim leading and trailing whitespace. Treat whitespace-only required values as missing and quarantine the record under C-04. Preserve meaningful internal spaces and punctuation. | Prevents false mismatches while preserving the original meaning of names and descriptions. |
+| **C-07 — Invalid Date or Time** | `date_acquired`, `feeding_date`, `feeding_time`, `vaccination_date`, `next_due_date`, `expense_date`, and `created_at` | A date or time cannot be parsed unambiguously, or a required date is missing. | Quarantine records with invalid required dates or times. An invalid optional date such as `next_due_date` may remain null only if the source contract permits it; record the issue. Do not guess between ambiguous date formats. | Keeps time-based reports accurate and prevents incorrect scheduling information. |
+| **C-08 — Orphan Child Record** | `batch_id` in `feed_records`, `vaccination_records`, and `expenses` | `batch_id` is missing or does not match an accepted `pig_batches.id`. | Quarantine the child record and log the unmatched `batch_id`. Do not assign it to another batch. | Maintains the parent-child relationship and prevents unrelated records from being joined. |
+| **C-09 — Unexpected Category or Status** | `pig_batches.status`, `vaccination_records.status`, `breed`, `feed_type`, `vaccine_name`, and `expense_type` | A value does not match an approved reference value or mapping. | Keep the original value for review or quarantine the affected record if the value prevents valid processing. Do not silently convert it to a guessed category. | Preserves source meaning and avoids misleading category-based analysis. |
+| **C-10 — Schema or Required-Column Failure** | All four input files | A file is unreadable, a required column is absent, or the received structure is incompatible with the documented schema. | Stop or hold the batch. Record the file and schema error. Do not silently drop columns or continue with partial input. | Ensures that the transformation uses the agreed Extraction Stage data contract. |
+
+### 3.3 Missing and Null Value Policy
+
+The source schema identifies required fields through `NOT NULL` constraints. The transformation stage applies the following policy:
+
+- **Required fields:** Missing or blank values are not replaced with invented values. The affected record is quarantined.
+- **Optional fields:** Fields such as `breed`, `start_weight`, `current_weight`, `date_acquired`, `next_due_date`, `administered_by`, `dosage`, `notes`, and `description` may remain null where permitted by the source schema.
+- **Default values:** Source defaults such as `pig_batches.status = 'Active'` and `vaccination_records.status = 'Completed'` are not re-applied to missing extracted values unless the Extraction Stage contract confirms that the source database supplied the default. Stage 2 must not assume a default that is not present in the handover.
+- **No fabricated data:** Missing quantities, amounts, dates, IDs, and relationships must not be filled with zero, the current date, or a generated identifier.
+
+### 3.4 Duplicate Detection and Record Retention
+
+Duplicate checks are performed separately for each table:
+
+1. Compare primary key `id` values within the same table.
+2. If repeated IDs have identical values in every column, retain one copy and count the remaining copies as exact duplicates removed.
+3. If repeated IDs have different values, hold the affected dataset for investigation. No “latest record” rule is applied because the documented schema does not define an `updated_at` column.
+4. Check `pig_batches.batch_code` for uniqueness after whitespace trimming. If trimming creates a collision, hold the conflicting batches for review.
+5. Record duplicate counts and the retention decision in the data-quality report.
+
+### 3.5 Cleaning Output and Audit Requirements
+
+For every input table, the cleaning process records:
+
+- Input row count.
+- Accepted row count.
+- Quarantined row count.
+- Exact duplicate copies removed.
+- Rule IDs applied and number of affected records.
+- Source record ID and rejection reason for each quarantined record, where an ID is available.
+
+The reconciliation must account for every input row:
+
+`input_records = accepted_records + quarantined_records + exact_duplicate_copies_removed`
+
+If the counts do not reconcile, the batch must not be approved for loading.
+
+---
+
+## 4. Standardization and Data Type Rules
+
+### 4.1 Purpose
+
+Standardization makes values consistent across the four datasets while retaining the field names, identifiers, and meanings defined in the Lab 2 technical metadata. The output keeps the source table structure and uses the documented PostgreSQL-compatible data types.
+
+### 4.2 Data Type and Format Rules
+
+| Rule ID | Table and column | Source / expected type | Standard output type and format | Conversion and failure handling |
+|---|---|---|---|---|
+| **S-01** | `id` and `batch_id` in all applicable tables | UUID | UUID, preserving the original value | Validate UUID format without changing the identifier. Quarantine invalid or missing IDs; see C-01 and C-08. |
+| **S-02** | `batch_code` | `VARCHAR(50)` | String, maximum 50 characters; trimmed | Preserve intended characters and case. Quarantine blank values and hold uniqueness collisions. |
+| **S-03** | `pig_count` | `INTEGER` | Integer | Convert only valid whole-number values. Reject decimals that are not whole numbers, text values, and negative counts. |
+| **S-04** | `start_weight`, `current_weight` | `DECIMAL(10,2)` | Decimal with two fractional digits | Convert valid numeric strings to decimal. Reject non-numeric and negative values. Do not silently round excess precision. |
+| **S-05** | `quantity_kg` | `DECIMAL(10,2)` | Decimal with two fractional digits, in kilograms | Convert valid values to decimal. Reject non-numeric or negative quantities. Preserve the documented kilogram unit. |
+| **S-06** | `amount` | `DECIMAL(10,2)` | Decimal with two fractional digits | Convert valid numeric values to decimal. The source documentation does not specify a currency, so Stage 2 must not assign or convert a currency. Quarantine invalid values and negative values unless an approved adjustment rule exists. |
+| **S-07** | `date_acquired`, `feeding_date`, `vaccination_date`, `next_due_date`, `expense_date` | `DATE` | `YYYY-MM-DD` | Parse valid dates and write in ISO date format. Quarantine invalid required dates. Preserve null for optional dates when allowed. |
+| **S-08** | `created_at` | `TIMESTAMP` | Consistent ISO 8601 timestamp representation | Parse valid timestamps and preserve their timezone meaning. Do not assume a timezone or convert local time to UTC unless the source metadata defines it. |
+| **S-09** | `feeding_time` | `VARCHAR(20)` | Consistent `HH:MM` representation; use `HH:MM:SS` only when seconds are consistently supplied | Parse only unambiguous time values. Quarantine invalid values. |
+| **S-10** | `breed`, `status`, `feed_type`, `vaccine_name`, `administered_by`, `expense_type` | `VARCHAR` fields as defined in the source schema | Trimmed text, preserving meaningful spelling and names | Apply case or spelling mappings only when an approved reference mapping exists. Flag unknown values for review. |
+| **S-11** | `notes`, `description` | `TEXT` | Trimmed text; null allowed | Preserve the content and meaningful punctuation. Do not remove meaningful words or replace null with invented descriptions. |
+| **S-12** | All columns | Source snake_case names | Retain the exact documented snake_case column names | Do not rename or silently remove source columns. Any schema change requires approval and documentation. |
+
+### 4.3 Text and Reference Value Rules
+
+Text standardization follows these principles:
+
+- Remove leading and trailing whitespace from text fields.
+- Preserve internal spaces, punctuation, and meaningful names.
+- Normalize known status or category variants only through a mapping approved by the project team.
+- Do not automatically convert all names to uppercase or title case because this may change meaningful names.
+- Keep unrecognized values visible in the quality report for review.
+
+The technical metadata documents default values of `Active` for `pig_batches.status` and `Completed` for `vaccination_records.status`. These are source defaults, not permission to replace missing values during transformation.
+
+**Reference mapping status:** The supplied technical metadata does not provide an approved list of breed, feed type, vaccine, expense type, or status aliases. Therefore, no specific category mapping is assumed in this document. The team must approve a mapping table before such conversions are applied.
+
+### 4.4 Numeric Precision, Units, and Currency
+
+- `start_weight`, `current_weight`, `quantity_kg`, and `amount` use the documented `DECIMAL(10,2)` precision.
+- `pig_count` remains an integer.
+- Feed quantity remains measured in kilograms (`kg`).
+- The source documentation does not identify the currency for `expenses.amount`; the transformation stage preserves the numeric amount without assigning a currency symbol or performing currency conversion.
+- Values with excess decimal precision must be reviewed or rejected according to the approved precision policy. They must not be silently rounded.
+
+### 4.5 Conversion Failure Handling
+
+If a value cannot be converted to its target type:
+
+1. Do not replace it with a default or guessed value.
+2. Quarantine the affected record when the field is required or prevents reliable processing.
+3. Record the table, column, source ID if available, rule ID, original value where safe, and conversion error.
+4. If the problem affects the file schema or prevents reliable interpretation of the dataset, hold the batch for review.
+5. Include the affected count in the data-quality report and transformation log.
+
+---
+
+## 5. Business Transformation Rules
+
+### 5.1 Purpose
+
+Business transformations convert the cleaned and standardized farming records into useful information for reporting and analytics. Calculations and summaries are performed only on accepted records after primary keys, numeric values, dates, and parent-child relationships have been validated.
+
+The original source IDs are retained. Summary outputs are kept separate from detail-level records to prevent downstream users from counting the same information twice.
+
+### 5.2 Business Rule Register
+
+| Rule ID | Input columns | Logic or formula | Output column / dataset | Business reason |
+|---|---|---|---|---|
+| **B-01 — Batch Weight Change** | `pig_batches.start_weight`, `pig_batches.current_weight` | Calculate `current_weight - start_weight` only when both values are valid and non-null. Do not substitute missing weights with zero. | Optional `weight_change` in the transformed pig batch output | Shows the recorded difference between the batch's initial and current weight. |
+| **B-02 — Total Feed per Batch** | `feed_records.batch_id`, `feed_records.quantity_kg` | Group accepted feed records by `batch_id` and sum `quantity_kg` within the defined extraction/reporting window. | `feed_summary.total_feed_kg`, grouped by `batch_id` | Helps measure the feed quantity recorded for each pig batch during the reporting window. |
+| **B-03 — Total Expenses per Batch** | `expenses.batch_id`, `expenses.amount` | Group accepted expense records by `batch_id` and sum `amount` within the defined extraction/reporting window. | `expense_summary.total_expense`, grouped by `batch_id` | Provides a batch-level view of recorded expenses. |
+| **B-04 — Expenses by Type** | `expenses.expense_type`, `expenses.amount` | Group accepted expense records by standardized `expense_type` and sum `amount` within the reporting window. | Optional `expense_type_summary.total_amount` | Supports comparison of spending across expense categories. |
+| **B-05 — Vaccination Due Indicator** | `vaccination_records.next_due_date`, processing date | If approved by the project team, compare `next_due_date` with the processing date and assign a separate indicator such as `Overdue`, `Due`, or `Upcoming` using a documented threshold. | Optional `vaccination_due_status` | Helps identify vaccination records that may require attention. It must not overwrite the source `status`. |
+| **B-06 — Batch Relationship Lookup** | `pig_batches.id`; `feed_records.batch_id`; `vaccination_records.batch_id`; `expenses.batch_id` | Match each child table's `batch_id` to `pig_batches.id`. Use the validated parent dataset as the lookup source. | Validated child records with preserved `batch_id`; optional reporting join | Connects feed, vaccination, and expense activity to the correct pig batch. |
+| **B-07 — Reporting Window Attribution** | `created_at`, `window_start`, `window_end`, `pipeline_run_id` | Retain the extraction run ID and its recorded window with the transformed output and summaries. Do not use business dates as a substitute for the extraction watermark. | Run and window metadata associated with each output | Makes each result traceable to the exact extraction batch and supports reproducible reporting. |
+
+### 5.3 Joins and Lookup Processing
+
+The source schema defines one parent table and three child tables:
+
+```text
+pig_batches (1)
+    ├── feed_records (many)
+    ├── vaccination_records (many)
+    └── expenses (many)
+```
+
+The transformation stage applies the following join and lookup rules:
+
+| Parent table | Child table | Join key | Join approach | Handling unmatched records |
+|---|---|---|---|---|
+| `pig_batches` | `feed_records` | `pig_batches.id = feed_records.batch_id` | Validate the child foreign key against the accepted parent IDs before reporting joins. | Quarantine the feed record under R-01. |
+| `pig_batches` | `vaccination_records` | `pig_batches.id = vaccination_records.batch_id` | Validate the child foreign key against the accepted parent IDs before reporting joins. | Quarantine the vaccination record under R-01. |
+| `pig_batches` | `expenses` | `pig_batches.id = expenses.batch_id` | Validate the child foreign key against the accepted parent IDs before reporting joins. | Quarantine the expense record under R-01. |
+
+`pig_batches` is processed first. Child records are checked against the accepted parent IDs before they are joined or aggregated. The transformation must not assign an unmatched child record to a different batch.
+
+For detail-level outputs, retain the original child rows and their `batch_id`. If a combined reporting view is created, use the validated relationship and keep the detail and summary datasets clearly separated.
+
+### 5.4 Aggregation Rules
+
+| Summary dataset | Grouping level | Measure | Aggregation | Window |
+|---|---|---|---|---|
+| `feed_summary.csv` | `batch_id` | `quantity_kg` | Sum | Defined extraction/reporting window |
+| `expense_summary.csv` | `batch_id` | `amount` | Sum | Defined extraction/reporting window |
+| Optional expense-by-type summary | `expense_type` | `amount` | Sum | Defined extraction/reporting window |
+
+Only accepted, validated detail records are included in the summaries. Each summary must retain or be associated with `pipeline_run_id`, `window_start`, and `window_end`. Summary totals must be checked against the accepted detail records before handover.
+
+### 5.5 Filtering and Conditional Logic
+
+The Extraction Stage applies the technical extraction window using the documented `created_at` boundary:
+
+```text
+window_start < created_at <= window_end
+```
+
+Stage 2 uses the received handover and does not re-extract records or change that watermark. Within Stage 2:
+
+- Records failing cleaning or relationship rules are quarantined and counted.
+- Exact duplicate copies are removed only under the documented duplicate rule and are counted.
+- No business-status exclusion, such as excluding inactive pig batches or completed vaccination records, is applied unless the project team defines and approves that business rule.
+- No cancellation or refund category is assumed because the supplied schema and technical metadata do not define such business statuses.
+- Optional vaccination due indicators are generated only after the team approves the status definitions and date thresholds.
+
+This approach ensures that business exclusions are explicit, reviewable, and reported rather than silently applied.
+
+### 5.6 Dimensional Modeling
+
+The supplied Lab 2 technical metadata describes operational farming tables and their relationships. It does not define a dimensional model, fact tables, dimension tables, surrogate keys, or Slowly Changing Dimension (SCD) requirements.
+
+Therefore, Stage 2 will:
+
+- Preserve the source UUID primary keys and foreign keys.
+- Keep the four transformed detail datasets aligned with the documented source schema.
+- Generate separate summary datasets only where required for reporting.
+- Avoid creating surrogate keys or applying SCD Type 1 or Type 2 without an approved downstream data-model design.
+
+### 5.7 Business Transformation Validation
+
+Before the transformed datasets are handed to the Loading Stage, verify that:
+
+1. `weight_change` is calculated only when both source weights are valid.
+2. Feed and expense summaries include only accepted detail records.
+3. Summary totals match the corresponding detail-level calculations for the same reporting window.
+4. Each child record included in a join has a valid `batch_id` matching an accepted `pig_batches.id`.
+5. The source IDs and relationships remain unchanged.
+6. The extraction run ID and extraction window are retained for traceability.
+7. Optional business rules, including vaccination due status or category mappings, have documented approval before being applied.
