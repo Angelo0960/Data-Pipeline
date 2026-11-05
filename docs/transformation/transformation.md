@@ -836,3 +836,206 @@ The transformation process must not silently adapt to an unexpected schema chang
 
 ---
 
+## 7. Transformation Validation and Data Quality Checks
+
+The Transformation Stage validates the cleaned, standardized, and transformed PrepAPig datasets before they are handed over to the Loading Stage. Validation confirms that records are complete, accurate, consistent, and suitable for loading.
+
+### 7.1 Validation Check Register
+
+| Check Name | Target | Purpose | Validation Criteria | Severity |
+|---|---|---|---|---|
+| Input Handover Check | Four input CSV files and extraction metadata | Confirm that Transformation receives an approved and complete handover | Extraction status is `APPROVED`; all four files and required metadata are present and readable | Critical |
+| Required Field Check | Required columns in all four datasets | Prevent incomplete records from entering the output | Required fields are not null or blank, based on the rules in Section 3 | Critical |
+| Primary Key Uniqueness | `id` in `pig_batches`, `feed_records`, `vaccination_records`, and `expenses` | Prevent missing, duplicate, or conflicting record identifiers | Every accepted record has a valid UUID; no conflicting duplicate IDs remain | Critical |
+| Batch Code Uniqueness | `pig_batches.batch_code` | Prevent two pig batch records from using the same business identifier | Batch codes are not blank and are unique after trimming whitespace | Critical |
+| Data Type and Format Check | UUID, integer, decimal, date, time, and timestamp fields | Ensure that values follow the transformed data contract | Accepted values conform to the data types and formats defined in Section 4 and Section 6 | Critical |
+| Numeric and Business Rule Check | `pig_count`, weights, `quantity_kg`, and `amount` | Prevent invalid values from affecting calculations | Counts and numeric values meet the approved non-negative or positive-value rules; invalid values are quarantined | Critical |
+| Date Relationship Check | `vaccination_date` and `next_due_date` | Prevent invalid vaccination date relationships | When `next_due_date` is present, it must not be earlier than `vaccination_date` | Critical |
+| Referential Integrity Check | Child-table `batch_id` fields | Prevent orphan records and incorrect batch relationships | Every accepted child record references an accepted `pig_batches.id` | Critical |
+| Record Reconciliation | Each input table and its transformed detail output | Detect lost or unaccounted-for records | `input_records = accepted_records + quarantined_records + exact_duplicate_copies_removed` | Critical |
+| Aggregation Check | `feed_summary` and `expense_summary` | Ensure summary values are correct | Summary totals equal the sums of the corresponding accepted detail records for the same reporting window | Critical |
+| Join Cardinality Check | `pig_batches` joined with feed, vaccination, and expense records | Prevent unexpected row multiplication | Each child record matches no more than one parent batch; unmatched child records are quarantined | Critical |
+| Idempotency Check | Output records for the same extraction run | Prevent duplicate output after a rerun | Reprocessing the same `pipeline_run_id` and source IDs does not create additional duplicate records | Critical |
+| Audit and Metadata Check | Transformation log and data-quality report | Ensure that the run can be traced and reviewed | Run identifiers, window, counts, rules, validation results, status, and errors are recorded | Critical |
+
+### 7.2 Validation and Reconciliation Rules
+
+- **Row-level cleaning:** Account for every input row as accepted, quarantined, or an exact duplicate copy removed. Do not silently delete records.
+- **Aggregation:** Recalculate feed and expense summaries from accepted detail records. Validate both the contributing records and the resulting totals.
+- **Joins:** Validate the relationship between `pig_batches.id` and each child table's `batch_id`. Check for unmatched records and unexpected row multiplication.
+- **Filtering:** Record the reason and count for every excluded record. Do not silently exclude records based on unapproved business conditions.
+- **Modified records:** Track records changed by cleaning or standardization separately. Modified records remain part of the accepted output and are not an additional reconciliation category.
+
+### 7.3 Validation Scope
+
+Validation must cover required fields, primary-key uniqueness, batch-code uniqueness, referential integrity, data types, date relationships, numeric rules, aggregation accuracy, and record reconciliation. The Extraction Stage's source-connectivity and extraction checks are not repeated here. Transformation validates the quality and completeness of the received handover and the resulting transformed output.
+
+---
+
+## 8. Transformation Metadata and Log Specification
+
+The Transformation Stage must create a log for each transformation run. The log connects the transformed output to its Extraction Stage handover and supports monitoring, troubleshooting, auditing, and recovery.
+
+### 8.1 Required Metadata Fields
+
+| Field | Purpose | Example or Format |
+|---|---|---|
+| `transformation_run_id` | Unique identifier for one transformation execution | `TRN_20261106_0200` |
+| `pipeline_run_id` | Links the transformation to the Extraction Stage run | Read from extraction metadata, e.g. `PREPAPIG_20261004_230000` |
+| `table_name` | Identifies the dataset being transformed | `pig_batches` |
+| `window_start` | Records the beginning of the extraction window | Timestamp from extraction metadata |
+| `window_end` | Records the end of the extraction window | Timestamp from extraction metadata |
+| `transformation_start` | Records when transformation begins | ISO 8601 timestamp |
+| `transformation_end` | Records when transformation finishes | ISO 8601 timestamp |
+| `transformation_status` | Records the result of the run | `PASS`, `WARNING`, or `FAIL` |
+| `input_records` | Number of rows read from the input file | Integer |
+| `output_records` | Number of accepted transformed detail rows | Integer |
+| `quarantined_records` | Number of records excluded for data-quality reasons | Integer |
+| `duplicates_removed` | Number of exact duplicate copies removed | Integer |
+| `records_modified` | Number of accepted records changed by cleaning or standardization | Integer; tracked separately |
+| `rules_applied` | Cleaning, standardization, relationship, and business rule IDs applied, with affected counts | `C-06: 12; S-07: 35; B-02: 1` |
+| `validation_result` | Records the outcome of required validation checks | `PASS` or `FAIL`, with warning details where applicable |
+| `output_location` | Identifies where the transformed output was written | Configured output path |
+| `error_message` | Provides a safe diagnostic message when an error occurs | Text; must not contain credentials or secrets |
+| `transformation_duration` | Records the elapsed processing time | Seconds |
+| `transformation_version` | Identifies the version of the transformation code or rules | Approved version identifier |
+
+### 8.2 Logging Requirements
+
+1. Read and retain the Extraction Stage `pipeline_run_id`, `window_start`, and `window_end`.
+2. Generate a unique `transformation_run_id` for each execution.
+3. Record the start and end timestamps, status, and duration.
+4. Record input, accepted output, quarantined, duplicate, and modified record counts.
+5. Record the rule IDs applied and the number of records affected by each rule.
+6. Record validation results, output location, and safe error details.
+7. Keep the Extraction Stage metadata unchanged; link to it using `pipeline_run_id`.
+8. Never include passwords, API keys, access tokens, or database connection secrets in logs.
+
+The transformation log and data-quality report must allow a reviewer to identify the input run, determine what happened to its records, and locate the resulting output.
+
+---
+
+## 9. Log Retention, Rejected Data, and Access
+
+Transformation logs and quarantined records must be retained so that the team can investigate errors, verify processing decisions, and recover records when necessary.
+
+### 9.1 Storage and Retention
+
+- Store transformation logs and data-quality reports in the configured Transformation Stage log location.
+- Store quarantined records separately from accepted transformed datasets.
+- Retain the source table name, source record ID when available, `pipeline_run_id`, `transformation_run_id`, rule ID, rejection reason, and rejection timestamp for each quarantined record.
+- Retain logs and quarantine records according to the approved project or institutional data-retention policy. The exact retention period and deployed storage location must be defined by the project team.
+- Archive records that have reached the end of their active retention period when required by the approved policy.
+
+### 9.2 Access Permissions
+
+Access must be limited according to each user's responsibility.
+
+| Role | Permitted Access |
+|---|---|
+| ETL Developer / Administrator | Read and write transformation outputs, logs, and quarantine records; perform approved recovery and maintenance |
+| Project Analyst / Data Reviewer | Read transformation logs, validation results, and quarantine records for review |
+| Authorized Project Supervisor | Review acceptance decisions and approve records or batches for handover |
+| Unauthorized User | No access to transformation logs or quarantined data |
+
+### 9.3 Archiving and Deletion
+
+- Archive logs and rejected records when required by the approved retention policy.
+- Delete records only after the retention period has ended and the responsible project authority has approved deletion.
+- Do not delete logs or quarantined records while they are needed for troubleshooting, audit, correction, or recovery.
+- Record approved archival or deletion actions for accountability.
+
+---
+
+## 10. Transformation Acceptance and Handover Rules
+
+This section defines whether transformed data may proceed to the Loading Stage. Acceptance decisions are based on the validation criteria established in Section 7, not on assumptions made after processing.
+
+### 10.1 Acceptance Decision Rules
+
+| Overall Condition | Acceptance Decision | Pipeline Action |
+|---|---|---|
+| All required critical checks pass and no unresolved warning remains | `APPROVED` | Proceed to Loading Stage |
+| Critical checks pass, but one or more non-critical warnings require review | `MANUAL REVIEW` | Hold the affected output until an authorized reviewer decides |
+| One or more critical checks fail | `REJECTED` | Stop handover; correct, rerun, or quarantine the affected data |
+
+### 10.2 Approval Conditions
+
+**Automatic Approval**
+
+A batch may be approved automatically only when:
+- All required input files and metadata are present and approved.
+- All critical validation checks pass.
+- Record counts reconcile.
+- Aggregation and relationship checks pass.
+- Required transformation logs and data-quality reports are complete.
+- No unresolved warning requires manual review.
+
+**Manual Review**
+
+A batch must be held for review when:
+- A non-critical validation warning remains unresolved.
+- An unexpected category or status value requires an approved mapping decision.
+- A business rule or optional derived field requires confirmation.
+- Partial acceptance is being considered because some records were quarantined.
+
+The reviewer and approval decision must be recorded before the affected output proceeds.
+
+**Rejection or Failure**
+
+A batch or affected dataset must be rejected or stopped when:
+- A required input file or column is missing or unreadable.
+- A critical schema, primary-key, or referential-integrity check fails.
+- Record reconciliation does not balance.
+- Summary calculations are incorrect.
+- Output cannot be traced to its extraction run.
+- The transformation produces incomplete or unreliable output.
+
+### 10.3 Handover Package
+
+The Transformation Stage provides the following items to the Loading Stage:
+
+| Handover Item | Description |
+|---|---|
+| `pig_batches_transformed.csv` | Cleaned and standardized pig batch records, including `weight_change` when valid |
+| `feed_records_transformed.csv` | Accepted feed records with valid batch relationships |
+| `feed_summary.csv` | Total accepted feed quantity by `batch_id` for the recorded window |
+| `vaccination_records_transformed.csv` | Accepted vaccination records with standardized dates and values |
+| `expenses_transformed.csv` | Accepted expense records with valid batch relationships |
+| `expense_summary.csv` | Total accepted expenses by `batch_id` for the recorded window |
+| Data-quality report | Profiling results, validation outcomes, record counts, applied rules, and quarantine reasons |
+| Transformation log | Run identifiers, extraction window, timestamps, counts, status, output location, and errors |
+| Acceptance result | `APPROVED`, `MANUAL REVIEW`, or `REJECTED`, with the decision reason |
+
+Only approved outputs may proceed automatically to the Loading Stage. Outputs under manual review must remain on hold until an authorized decision is recorded. Rejected outputs must not be loaded.
+
+---
+
+## 11. Common Transformation Problems and Mitigation
+
+The following problems are relevant to the PrepAPig batch transformation process. The listed causes and impacts describe possible pipeline risks, not confirmed problems found in the source data.
+
+| Problem | Possible Cause | Impact | Mitigation |
+|---|---|---|---|
+| Duplicate records after a rerun | The same extraction batch is processed more than once and output is appended without checking source IDs | Duplicate batch, feed, vaccination, or expense records; incorrect summary totals | Make transformation idempotent. Use `pipeline_run_id` and stable source IDs; replace or upsert output for the same run rather than blindly appending |
+| Late-arriving records | A source record is created after the current extraction window closes | The record is not included in the current batch and may appear in a later extraction run | Preserve extraction window metadata and process the later approved handover. Do not change the extraction watermark in Transformation |
+| Unexpected schema change | A required source column is renamed, removed, or changes data type | Transformation may fail or produce incomplete or incorrect output | Compare input files with the documented data contract before processing. Log the mismatch and hold the affected dataset until the mapping is reviewed and approved |
+| Invalid or incomplete records | Required values are missing, numeric values are invalid, or dates cannot be parsed | Records may be excluded or may distort calculations if not handled | Apply the cleaning and standardization rules in Sections 3 and 4. Quarantine affected records and record the rule ID and reason |
+| Orphan child records | A feed, vaccination, or expense record references a `batch_id` that does not exist in the accepted `pig_batches` dataset | Records cannot be reliably associated with a pig batch | Validate child `batch_id` values against `pig_batches.id`. Quarantine unmatched records; do not assign another batch ID |
+| Row multiplication after a join | A join uses an incorrect or non-unique lookup key | Detail rows and aggregate totals may be overstated | Validate join cardinality and use `pig_batches.id` as the parent key. Check that each child record matches no more than one parent |
+| Batch processing takes too long | Input volume increases or transformation and aggregation operations become inefficient | Delayed output and downstream Loading Stage processing | Measure transformation duration, review slow processing steps, and optimize Python processing and joins without changing business rules |
+| Summary totals do not match detail records | Invalid records are included, records are counted more than once, or aggregation logic is incorrect | Feed and expense reports become inaccurate | Recalculate summaries using accepted detail records only; compare totals by `batch_id` and reporting window before handover |
+| Transformation output is incomplete after a failure | The process stops while output files are being written | The Loading Stage may receive partial or inconsistent files | Write outputs to a temporary location and publish them only after all required validations pass. Record the failure and rerun the same approved input |
+| Missing or incomplete transformation logs | Logging fails or required metadata fields are not recorded | The team cannot trace, audit, or recover the affected batch reliably | Validate required log fields before handover. Hold output if run identifiers, counts, status, or validation results are missing |
+
+### 11.1 Problem Monitoring
+
+For each transformation run, review:
+- Input, accepted, quarantined, and duplicate counts.
+- Validation failures and warnings.
+- Rule IDs applied and affected-record counts.
+- Transformation duration and processing status.
+- Summary reconciliation and join validation results.
+- Output completeness and traceability to the Extraction Stage run.
+
+The Transformation Stage is complete only when its outputs have passed the required validation checks, the run has been logged, and the acceptance decision has been recorded. Loading and warehouse performance tuning are outside the scope of this stage.
