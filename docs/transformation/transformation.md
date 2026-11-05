@@ -583,256 +583,223 @@ Before the transformed datasets are handed to the Loading Stage, verify that:
 
 # 6. Transformed Data Contract and Naming Convention
 
-## 6.1 Purpose
+This section defines the structure, data types, constraints, naming rules, and source-to-target mappings for the data produced by the PrepAPig Transformation Stage. The contract describes the data that the **Loading Stage receives** after cleaning, standardization, relationship validation, and approved business transformations.
 
-The transformed data contract defines the expected structure, data types, naming conventions, and source-to-target mapping of the business-ready PrepAPig outputs.
+The contract follows the documented PrepAPig source datasets: `pig_batches`, `feed_records`, `vaccination_records`, and `expenses`. It also defines the two summary outputs produced by the business transformation rules: `feed_summary` and `expense_summary`.
 
-This contract is applied after data cleaning, standardization, and business transformation. It defines what the **Loading Stage** should receive from the Transformation Stage.
+## 6.1 Required Output Schema
 
-The contract is based on the documented PrepAPig source tables:
+The transformed output preserves the source UUID identifiers and the parent-child relationships. Required fields must contain valid values. Optional fields may remain `NULL` where permitted by the source schema and transformation rules.
 
-- `pig_batches`
-- `feed_records`
-- `vaccination_records`
-- `expenses`
+### 6.1.1 Transformed Pig Batch Dataset — `pig_batches`
 
-> **Scope:** This contract describes the transformed output. It is not a repetition of the Extraction Contract.
-
----
-
-## 6.2 Required Output Schema
-
-### 6.2.1 Transformed Pig Batch Dataset
-
-| Target Column | Data Type | Nullable | Key / Constraint | Source / Derivation |
+| Column | Data Type | Nullable | Key / Constraint | Source or Derivation |
 |---|---|---:|---|---|
-| `id` | UUID | No | Primary Key | `pig_batches.id` |
-| `batch_code` | VARCHAR(50) | No | Unique business identifier | `pig_batches.batch_code` |
-| `pig_count` | INTEGER | No | Positive value | `pig_batches.pig_count` |
+| `id` | UUID | No | Primary key | `pig_batches.id`; preserve source ID |
+| `batch_code` | VARCHAR(50) | No | Unique business identifier | `pig_batches.batch_code`; trim whitespace |
+| `pig_count` | INTEGER | No | Non-negative whole number; apply the approved farm rule | `pig_batches.pig_count` |
 | `breed` | VARCHAR(100) | Yes | — | `pig_batches.breed` |
-| `status` | VARCHAR(30) | Yes | — | `pig_batches.status` |
+| `status` | VARCHAR(30) | Yes | Preserve source value; map only with an approved reference list | `pig_batches.status` |
 | `start_weight` | DECIMAL(10,2) | Yes | Non-negative | `pig_batches.start_weight` |
 | `current_weight` | DECIMAL(10,2) | Yes | Non-negative | `pig_batches.current_weight` |
-| `date_acquired` | DATE | Yes | Valid date | `pig_batches.date_acquired` |
-| `created_at` | TIMESTAMP | No | Lineage timestamp | `pig_batches.created_at` |
-| `weight_change` | DECIMAL(10,2) | Yes | Derived | `current_weight - start_weight` |
+| `date_acquired` | DATE | Yes | Valid date when present | `pig_batches.date_acquired` |
+| `created_at` | TIMESTAMP | No | Preserve source timestamp and timezone meaning | `pig_batches.created_at` |
+| `weight_change` | DECIMAL(10,2) | Yes | Derived; only when both weights are valid and present | `current_weight - start_weight` (B-01) |
 
----
+### 6.1.2 Transformed Feed Dataset — `feed_records`
 
-### 6.2.2 Transformed Feed Dataset
-
-| Target Column | Data Type | Nullable | Key / Constraint | Source / Derivation |
+| Column | Data Type | Nullable | Key / Constraint | Source or Derivation |
 |---|---|---:|---|---|
-| `id` | UUID | No | Primary Key | `feed_records.id` |
-| `batch_id` | UUID | No | Foreign Key → `pig_batches.id` | `feed_records.batch_id` |
-| `feed_type` | VARCHAR(100) | No | Required text | `feed_records.feed_type` |
-| `quantity_kg` | DECIMAL(10,2) | No | Positive value | `feed_records.quantity_kg` |
+| `id` | UUID | No | Primary key | `feed_records.id`; preserve source ID |
+| `batch_id` | UUID | No | Foreign key to `pig_batches.id` | `feed_records.batch_id` |
+| `feed_type` | VARCHAR(100) | No | Required text; trim whitespace | `feed_records.feed_type` |
+| `quantity_kg` | DECIMAL(10,2) | No | Non-negative quantity in kilograms | `feed_records.quantity_kg` |
 | `feeding_date` | DATE | No | Valid date | `feed_records.feeding_date` |
-| `feeding_time` | TIME | Yes | Valid time | `feed_records.feeding_time` |
-| `created_at` | TIMESTAMP | No | Lineage timestamp | `feed_records.created_at` |
+| `feeding_time` | TIME | Yes | Valid time when present | `feed_records.feeding_time`; standardize to 24-hour time |
+| `created_at` | TIMESTAMP | No | Preserve source timestamp and timezone meaning | `feed_records.created_at` |
 
----
+### 6.1.3 Feed Summary Dataset — `feed_summary`
 
-### 6.2.3 Feed Summary Dataset
-
-| Target Column | Data Type | Nullable | Key / Constraint | Source / Derivation |
+| Column | Data Type | Nullable | Key / Constraint | Source or Derivation |
 |---|---|---:|---|---|
-| `batch_id` | UUID | No | Foreign Key → `pig_batches.id` | `feed_records.batch_id` |
-| `total_feed_kg` | DECIMAL(12,2) | No | Non-negative | `SUM(quantity_kg)` grouped by `batch_id` |
-| `pipeline_run_id` | VARCHAR | No | Lineage identifier | Extraction handover metadata |
-| `window_start` | TIMESTAMP | No | Extraction window | Extraction handover metadata |
-| `window_end` | TIMESTAMP | No | Extraction window | Extraction handover metadata |
+| `batch_id` | UUID | No | Foreign key to `pig_batches.id`; summary grouping key | `feed_records.batch_id` |
+| `total_feed_kg` | DECIMAL(12,2) | No | Non-negative aggregate | `SUM(quantity_kg)` grouped by `batch_id` for the defined processing window (B-02) |
+| `pipeline_run_id` | VARCHAR | No | Extraction run lineage identifier | Extraction handover metadata |
+| `window_start` | TIMESTAMP | No | Extraction window boundary | Extraction handover metadata |
+| `window_end` | TIMESTAMP | No | Extraction window boundary | Extraction handover metadata |
 
----
+### 6.1.4 Transformed Vaccination Dataset — `vaccination_records`
 
-### 6.2.4 Transformed Vaccination Dataset
-
-| Target Column | Data Type | Nullable | Key / Constraint | Source / Derivation |
+| Column | Data Type | Nullable | Key / Constraint | Source or Derivation |
 |---|---|---:|---|---|
-| `id` | UUID | No | Primary Key | `vaccination_records.id` |
-| `batch_id` | UUID | No | Foreign Key → `pig_batches.id` | `vaccination_records.batch_id` |
-| `vaccine_name` | VARCHAR(100) | No | Required text | `vaccination_records.vaccine_name` |
+| `id` | UUID | No | Primary key | `vaccination_records.id`; preserve source ID |
+| `batch_id` | UUID | No | Foreign key to `pig_batches.id` | `vaccination_records.batch_id` |
+| `vaccine_name` | VARCHAR(100) | No | Required text; trim whitespace | `vaccination_records.vaccine_name` |
 | `vaccination_date` | DATE | No | Valid date | `vaccination_records.vaccination_date` |
-| `next_due_date` | DATE | Yes | Must not precede vaccination date | `vaccination_records.next_due_date` |
+| `next_due_date` | DATE | Yes | Must not be earlier than `vaccination_date` when present | `vaccination_records.next_due_date` |
 | `administered_by` | VARCHAR(100) | Yes | — | `vaccination_records.administered_by` |
 | `dosage` | VARCHAR(100) | Yes | — | `vaccination_records.dosage` |
 | `notes` | TEXT | Yes | — | `vaccination_records.notes` |
-| `status` | VARCHAR(30) | Yes | — | `vaccination_records.status` |
-| `created_at` | TIMESTAMP | No | Lineage timestamp | `vaccination_records.created_at` |
-| `vaccination_due_status` | VARCHAR(20) | Yes | Derived, if approved | Derived from `next_due_date` and processing date |
+| `status` | VARCHAR(30) | Yes | Preserve source value; do not overwrite with a derived due indicator | `vaccination_records.status` |
+| `created_at` | TIMESTAMP | No | Preserve source timestamp and timezone meaning | `vaccination_records.created_at` |
+| `vaccination_due_status` | VARCHAR(20) | Yes | Optional derived field; apply only after business-rule approval | Derived from `next_due_date` and the documented processing date (B-05) |
 
----
+### 6.1.5 Transformed Expense Dataset — `expenses`
 
-### 6.2.5 Transformed Expense Dataset
-
-| Target Column | Data Type | Nullable | Key / Constraint | Source / Derivation |
+| Column | Data Type | Nullable | Key / Constraint | Source or Derivation |
 |---|---|---:|---|---|
-| `id` | UUID | No | Primary Key | `expenses.id` |
-| `batch_id` | UUID | No | Foreign Key → `pig_batches.id` | `expenses.batch_id` |
-| `expense_type` | VARCHAR(100) | No | Required text | `expenses.expense_type` |
-| `amount` | DECIMAL(12,2) | No | Non-negative | `expenses.amount` |
+| `id` | UUID | No | Primary key | `expenses.id`; preserve source ID |
+| `batch_id` | UUID | No | Foreign key to `pig_batches.id` | `expenses.batch_id` |
+| `expense_type` | VARCHAR(100) | No | Required text; trim whitespace | `expenses.expense_type` |
+| `amount` | DECIMAL(12,2) | No | Non-negative amount; preserve numeric meaning | `expenses.amount`; standardized from source decimal |
 | `expense_date` | DATE | No | Valid date | `expenses.expense_date` |
 | `description` | TEXT | Yes | — | `expenses.description` |
-| `created_at` | TIMESTAMP | No | Lineage timestamp | `expenses.created_at` |
+| `created_at` | TIMESTAMP | No | Preserve source timestamp and timezone meaning | `expenses.created_at` |
 
----
+### 6.1.6 Expense Summary Dataset — `expense_summary`
 
-### 6.2.6 Expense Summary Dataset
-
-| Target Column | Data Type | Nullable | Key / Constraint | Source / Derivation |
+| Column | Data Type | Nullable | Key / Constraint | Source or Derivation |
 |---|---|---:|---|---|
-| `batch_id` | UUID | No | Foreign Key → `pig_batches.id` | `expenses.batch_id` |
-| `total_expense` | DECIMAL(12,2) | No | Non-negative | `SUM(amount)` grouped by `batch_id` |
-| `pipeline_run_id` | VARCHAR | No | Lineage identifier | Extraction handover metadata |
-| `window_start` | TIMESTAMP | No | Extraction window | Extraction handover metadata |
-| `window_end` | TIMESTAMP | No | Extraction window | Extraction handover metadata |
+| `batch_id` | UUID | No | Foreign key to `pig_batches.id`; summary grouping key | `expenses.batch_id` |
+| `total_expense` | DECIMAL(12,2) | No | Non-negative aggregate | `SUM(amount)` grouped by `batch_id` for the defined processing window (B-03) |
+| `pipeline_run_id` | VARCHAR | No | Extraction run lineage identifier | Extraction handover metadata |
+| `window_start` | TIMESTAMP | No | Extraction window boundary | Extraction handover metadata |
+| `window_end` | TIMESTAMP | No | Extraction window boundary | Extraction handover metadata |
 
----
+**Schema notes**
 
-# 6.3 Naming Convention
+- The four transformed detail datasets retain their source primary keys and foreign keys.
+- `feed_summary` and `expense_summary` are separate aggregate outputs. They do not replace the detail records.
+- Summary calculations use accepted records only and are associated with the extraction run and window used to produce them.
+- `weight_change` and `vaccination_due_status` are derived fields. The vaccination due indicator is included only if the business rule and processing-date definition are approved.
+- The source documentation does not define sales quantity, selling price, or revenue fields. Therefore, this contract does not define revenue or profit outputs.
+- No dimensional warehouse model is specified; no fact tables, dimension tables, surrogate keys, or slowly changing dimensions are introduced.
 
-PrepAPig transformed datasets use **lowercase snake_case** naming.
+## 6.2 Naming Convention
 
-### Table / Dataset Naming
+PrepAPig transformed datasets and columns use **lowercase `snake_case`**. Names must be descriptive, consistent, and traceable to the source data.
 
-```text
-pig_batches
-feed_records
-feed_summary
-vaccination_records
-expenses
-expense_summary
-```
+### 6.2.1 Table and Dataset Names
 
-### Column Naming
+| Dataset | Purpose |
+|---|---|
+| `pig_batches` | Transformed pig batch records |
+| `feed_records` | Transformed feed detail records |
+| `feed_summary` | Total feed quantity summarized by batch |
+| `vaccination_records` | Transformed vaccination records |
+| `expenses` | Transformed expense detail records |
+| `expense_summary` | Total expenses summarized by batch |
 
-```text
-batch_id
-batch_code
-pig_count
-start_weight
-current_weight
-weight_change
-quantity_kg
-feeding_date
-vaccination_date
-next_due_date
-expense_type
-expense_date
-created_at
-```
+### 6.2.2 Column Naming Examples
 
-### Naming Rules
+| Naming Purpose | Convention / Example |
+|---|---|
+| Primary key | `id` |
+| Foreign key | `<entity>_id`, such as `batch_id` |
+| Descriptive fields | `batch_code`, `pig_count`, `feed_type`, `expense_type` |
+| Numeric fields with units | `quantity_kg`, `total_feed_kg` |
+| Date-only fields | End with `_date`, such as `feeding_date` |
+| Time-only fields | End with `_time`, such as `feeding_time` |
+| Timestamp fields | End with `_at`, such as `created_at` |
+| Derived measures | Descriptive names, such as `weight_change` and `total_expense` |
 
-1. Use lowercase letters.
-2. Use underscores to separate words.
-3. Do not use spaces.
-4. Do not use special characters.
-5. Use descriptive business names.
-6. Preserve established source identifiers such as `id` and `batch_id`.
-7. Use unit suffixes where required, such as `_kg`.
-8. Use `_date` for date-only fields.
-9. Use `_time` for time-only fields.
-10. Use `_at` for timestamps.
+### 6.2.3 Naming Rules
 
----
+1. Use lowercase letters for table and column names.
+2. Separate words with underscores; do not use spaces.
+3. Avoid special characters in identifiers.
+4. Use descriptive names that reflect the field's meaning.
+5. Preserve source identifiers such as `id` and `batch_id`.
+6. Include measurement units in field names where needed, such as `_kg`.
+7. Use `_date`, `_time`, and `_at` consistently for date, time, and timestamp fields.
+8. Do not introduce `dim_`, `fact_`, or `stg_` prefixes because the documented PrepAPig transformation does not define a dimensional warehouse or separate staging schema.
 
-# 6.4 Key Naming Convention
+### 6.2.4 Key Naming Convention
 
-### Primary Keys
-
-The existing source UUID identifiers are preserved:
-
-```text
-id
-```
-
-### Foreign Keys
-
-Foreign keys use the referenced entity name followed by `_id`:
-
-```text
-batch_id
-```
-
-Relationship:
+The source UUID primary keys are retained as `id`. Child tables use `batch_id` as the foreign key referencing the parent batch.
 
 ```text
 pig_batches.id
-      ↓
-feed_records.batch_id
-
-pig_batches.id
-      ↓
-vaccination_records.batch_id
-
-pig_batches.id
-      ↓
-expenses.batch_id
+    ├── feed_records.batch_id
+    ├── vaccination_records.batch_id
+    └── expenses.batch_id
 ```
 
-No surrogate keys are introduced because a dimensional model is not currently defined for the PrepAPig transformation.
+Summary datasets use `batch_id` as their grouping and relationship field. No new surrogate key is required for the documented relational output.
 
----
+## 6.3 Source-to-Target Mapping
 
-# 6.5 Source-to-Target Mapping
-
-The following mappings document how transformed columns are derived.
+The mapping below shows how source fields are cleaned, standardized, preserved, or derived for the transformed output. Rule references correspond to the cleaning rules in Section 3, standardization rules in Section 4, and business transformation rules in Section 5.
 
 | Source Column | Target Column | Source Type | Target Type | Transformation Applied |
 |---|---|---|---|---|
-| `pig_batches.id` | `id` | UUID | UUID | Preserve source identifier |
-| `pig_batches.batch_code` | `batch_code` | VARCHAR | VARCHAR(50) | Trim and standardize whitespace |
-| `pig_batches.pig_count` | `pig_count` | INTEGER | INTEGER | Validate positive value |
-| `pig_batches.start_weight` | `start_weight` | DECIMAL | DECIMAL(10,2) | Standardize numeric type |
-| `pig_batches.current_weight` | `current_weight` | DECIMAL | DECIMAL(10,2) | Standardize numeric type |
-| `pig_batches.start_weight`, `current_weight` | `weight_change` | DECIMAL | DECIMAL(10,2) | Derived: `current_weight - start_weight` |
-| `feed_records.batch_id` | `batch_id` | UUID | UUID | Preserve FK relationship |
-| `feed_records.feed_type` | `feed_type` | VARCHAR | VARCHAR | Trim and standardize whitespace |
-| `feed_records.quantity_kg` | `quantity_kg` | DECIMAL | DECIMAL(10,2) | Validate positive quantity |
-| `feed_records.feeding_date` | `feeding_date` | DATE | DATE | Standardize date |
-| `vaccination_records.vaccine_name` | `vaccine_name` | VARCHAR | VARCHAR | Trim and standardize whitespace |
-| `vaccination_records.vaccination_date` | `vaccination_date` | DATE | DATE | Standardize date |
-| `vaccination_records.next_due_date` | `next_due_date` | DATE | DATE | Validate date relationship |
-| `expenses.expense_type` | `expense_type` | VARCHAR | VARCHAR | Trim and standardize whitespace |
-| `expenses.amount` | `amount` | DECIMAL | DECIMAL(12,2) | Validate non-negative amount |
-| `expenses.expense_date` | `expense_date` | DATE | DATE | Standardize date |
-| `feed_records.quantity_kg` | `total_feed_kg` | DECIMAL | DECIMAL(12,2) | Derived: `SUM(quantity_kg)` by `batch_id` |
-| `expenses.amount` | `total_expense` | DECIMAL | DECIMAL(12,2) | Derived: `SUM(amount)` by `batch_id` |
+| `pig_batches.id` | `id` | UUID | UUID | Validate and preserve source primary key (C-01, S-01) |
+| `pig_batches.batch_code` | `batch_code` | VARCHAR(50) | VARCHAR(50) | Trim whitespace; validate required value and uniqueness (C-03, C-06, S-02) |
+| `pig_batches.pig_count` | `pig_count` | INTEGER | INTEGER | Validate whole-number and non-negative rule (C-05, S-03) |
+| `pig_batches.breed` | `breed` | VARCHAR | VARCHAR(100) | Trim whitespace; preserve source meaning (C-06, S-10) |
+| `pig_batches.status` | `status` | VARCHAR | VARCHAR(30) | Trim and preserve source value; map only with approved reference values (C-06, C-09, S-10) |
+| `pig_batches.start_weight` | `start_weight` | DECIMAL(10,2) | DECIMAL(10,2) | Validate non-negative numeric value and standardize precision (C-05, S-04) |
+| `pig_batches.current_weight` | `current_weight` | DECIMAL(10,2) | DECIMAL(10,2) | Validate non-negative numeric value and standardize precision (C-05, S-04) |
+| `pig_batches.start_weight`, `pig_batches.current_weight` | `weight_change` | DECIMAL(10,2) | DECIMAL(10,2) | Derive `current_weight - start_weight` when both values are valid and present (B-01) |
+| `pig_batches.date_acquired` | `date_acquired` | DATE | DATE | Parse and standardize to `YYYY-MM-DD`; retain NULL when optional (C-07, S-07) |
+| `pig_batches.created_at` | `created_at` | TIMESTAMP | TIMESTAMP | Validate and standardize timestamp while preserving timezone meaning (C-07, S-08) |
+| `feed_records.id` | `id` | UUID | UUID | Validate and preserve source primary key (C-01, S-01) |
+| `feed_records.batch_id` | `batch_id` | UUID | UUID | Preserve foreign key and validate against `pig_batches.id` (C-08, R-01) |
+| `feed_records.feed_type` | `feed_type` | VARCHAR | VARCHAR(100) | Trim whitespace; preserve value unless an approved mapping exists (C-04, C-06, C-09, S-10) |
+| `feed_records.quantity_kg` | `quantity_kg` | DECIMAL(10,2) | DECIMAL(10,2) | Validate non-negative numeric value and retain kilogram unit (C-05, S-05) |
+| `feed_records.feeding_date` | `feeding_date` | DATE | DATE | Parse and standardize to `YYYY-MM-DD` (C-07, S-07) |
+| `feed_records.feeding_time` | `feeding_time` | VARCHAR(20) | TIME | Parse valid time and standardize to 24-hour format (C-07, S-09) |
+| `feed_records.created_at` | `created_at` | TIMESTAMP | TIMESTAMP | Validate and standardize timestamp (C-07, S-08) |
+| `feed_records.batch_id`, `feed_records.quantity_kg` | `feed_summary.batch_id`, `feed_summary.total_feed_kg` | UUID, DECIMAL(10,2) | UUID, DECIMAL(12,2) | Sum accepted `quantity_kg` by `batch_id` for the recorded window (B-02) |
+| Extraction metadata | `feed_summary.pipeline_run_id`, `window_start`, `window_end` | Metadata values | VARCHAR, TIMESTAMP, TIMESTAMP | Preserve extraction run and window for lineage (B-07) |
+| `vaccination_records.id` | `id` | UUID | UUID | Validate and preserve source primary key (C-01, S-01) |
+| `vaccination_records.batch_id` | `batch_id` | UUID | UUID | Preserve foreign key and validate against `pig_batches.id` (C-08, R-01) |
+| `vaccination_records.vaccine_name` | `vaccine_name` | VARCHAR | VARCHAR(100) | Validate required value and trim whitespace (C-04, C-06, S-10) |
+| `vaccination_records.vaccination_date` | `vaccination_date` | DATE | DATE | Parse and standardize to `YYYY-MM-DD` (C-07, S-07) |
+| `vaccination_records.next_due_date` | `next_due_date` | DATE | DATE | Standardize date; validate that it is not earlier than `vaccination_date` (C-07, S-07) |
+| `vaccination_records.administered_by` | `administered_by` | VARCHAR | VARCHAR(100) | Trim whitespace; preserve NULL when optional (C-06, S-10) |
+| `vaccination_records.dosage` | `dosage` | VARCHAR | VARCHAR(100) | Trim whitespace; preserve NULL when optional (C-06, S-10) |
+| `vaccination_records.notes` | `notes` | TEXT | TEXT | Trim surrounding whitespace; preserve content (C-06, S-11) |
+| `vaccination_records.status` | `status` | VARCHAR | VARCHAR(30) | Preserve source status; do not overwrite with derived due status (C-09, S-10) |
+| `vaccination_records.created_at` | `created_at` | TIMESTAMP | TIMESTAMP | Validate and standardize timestamp (C-07, S-08) |
+| `vaccination_records.next_due_date`, processing date | `vaccination_due_status` | DATE, processing date | VARCHAR(20) | Derive due indicator only when the business rule is approved (B-05) |
+| `expenses.id` | `id` | UUID | UUID | Validate and preserve source primary key (C-01, S-01) |
+| `expenses.batch_id` | `batch_id` | UUID | UUID | Preserve foreign key and validate against `pig_batches.id` (C-08, R-01) |
+| `expenses.expense_type` | `expense_type` | VARCHAR | VARCHAR(100) | Validate required value and trim whitespace (C-04, C-06, S-10) |
+| `expenses.amount` | `amount` | DECIMAL(10,2) | DECIMAL(12,2) | Validate numeric and non-negative value; preserve amount without assigning an undocumented currency (C-05, S-06) |
+| `expenses.expense_date` | `expense_date` | DATE | DATE | Parse and standardize to `YYYY-MM-DD` (C-07, S-07) |
+| `expenses.description` | `description` | TEXT | TEXT | Trim surrounding whitespace; preserve content and NULL when optional (C-06, S-11) |
+| `expenses.created_at` | `created_at` | TIMESTAMP | TIMESTAMP | Validate and standardize timestamp (C-07, S-08) |
+| `expenses.batch_id`, `expenses.amount` | `expense_summary.batch_id`, `expense_summary.total_expense` | UUID, DECIMAL(10,2) | UUID, DECIMAL(12,2) | Sum accepted `amount` by `batch_id` for the recorded window (B-03) |
+| Extraction metadata | `expense_summary.pipeline_run_id`, `window_start`, `window_end` | Metadata values | VARCHAR, TIMESTAMP, TIMESTAMP | Preserve extraction run and window for lineage (B-07) |
 
----
+## 6.4 Schema Consistency and Change Handling
 
-# 6.6 Schema Consistency
+The Transformation Stage must check each received input file against the approved Extraction Stage data contract before processing. Unexpected schema changes must be logged and assessed; the process must not silently rename, remove, or reinterpret columns.
 
-The transformed output must conform to this contract.
+| Schema Change | Required Handling |
+|---|---|
+| Required column is missing | Stop or hold the affected dataset and report a schema validation failure. |
+| Required column is renamed | Do not substitute another column automatically. Review and approve the updated source-to-target mapping first. |
+| Column data type changes | Check whether the new type can be converted without changing the value's meaning. Update the contract and conversion rule only after approval. |
+| New optional column is added | Record the change. Ignore it in the transformed output until its use is reviewed and approved. |
+| New required column is added | Hold processing until the source contract, target schema, and validation rules are updated. |
+| Column meaning or unit changes | Stop or hold the affected dataset until the meaning, unit, and any required conversion are confirmed. |
+| Primary-key or foreign-key structure changes | Fail or hold relationship validation until the key mapping and referential-integrity rules are reviewed. |
+| Output schema does not match this contract | Do not hand over the output to the Loading Stage until the contract mismatch is resolved. |
 
-### Expected Schema Change Handling
+### Schema Change Review Process
 
-If an unexpected input column is:
+1. Receive the approved Extraction Stage handover.
+2. Compare the input file names, column names, data types, and required fields with the approved source contract.
+3. Record any missing, added, renamed, or changed fields.
+4. Assess the impact on cleaning rules, standardization, relationships, business calculations, and output datasets.
+5. Obtain approval for any required contract or mapping changes.
+6. Update the transformation documentation and version information.
+7. Resume processing only after the updated schema passes validation.
 
-- **Added:** ignore it unless an approved transformation rule requires it.
-- **Removed:** fail or hold the affected transformation if the column is required.
-- **Renamed:** treat it as a schema mismatch; do not guess the replacement.
-- **Changed in data type:** hold the affected dataset until the mapping is reviewed.
-- **Changed in meaning:** require an updated transformation rule and data contract.
+**Contract boundary:** The Extraction Stage contract defines the source data received by Transformation. This Transformation Contract defines the cleaned, standardized, and derived outputs passed to the Loading Stage. It may include approved derived fields and summary datasets, but it does not introduce unsupported source fields, sales or profit measures, or dimensional structures that are not defined in the PrepAPig design.
 
-### Required Response
-
-```text
-Unexpected schema change
-        ↓
-Detect
-        ↓
-Log
-        ↓
-Assess impact
-        ↓
-Fail / Hold affected output when required
-        ↓
-Update contract only after approval
-```
-
-The transformation process must not silently adapt to an unexpected schema change.
 
 ---
 
