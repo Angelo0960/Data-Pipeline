@@ -1,0 +1,14 @@
+{
+  "name": "prepapig-data-pipeline-scheduler",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "schedule": "node scheduler.js",
+    "validate-schedule": "node scheduler.js --validate-config",
+    "retry": "node scheduler.js --retry-run"
+  },
+  "dependencies": {
+    "node-cron": "4.6.0"
+  }
+}

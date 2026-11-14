@@ -4,13 +4,13 @@
 
 The goal of Stage 2 is to transform the validated dataset handed over from the Extraction Stage into a cleaned, standardized, and business-ready dataset. The transformation process must be documented, traceable, and validated before Stage 2 is marked complete. PostgreSQL loading is a separate, implemented follow-on stage outside the BAT 405 midterm scope.
 
-This document describes the transformation process for the PrepAPig Batch Data Pipeline. The BAT 405 midterm deliverable covers **Stage 1: Extraction** and **Stage 2: Transformation** only. PostgreSQL loading is implemented as a separate post-midterm stage; recurring scheduling is follow-on work and is not yet configured. The pipeline processes four farming-related datasets: `pig_batches`, `feed_records`, `vaccination_records`, and `expenses`. Authentication credentials, passwords, API keys, access tokens, and unrelated profile information are outside the transformation scope.
+This document describes the transformation process for the PrepAPig Batch Data Pipeline. The BAT 405 midterm deliverable covers **Stage 1: Extraction** and **Stage 2: Transformation** only. PostgreSQL loading and recurring scheduling are implemented as separate post-midterm stages; neither changes the midterm scope. The pipeline processes four farming-related datasets: `pig_batches`, `feed_records`, `vaccination_records`, and `expenses`. Authentication credentials, passwords, API keys, access tokens, and unrelated profile information are outside the transformation scope.
 
 ## Repository implementation status
 
 The current code implements an on-demand handover-to-transformation flow. It accepts only an approved handover, reads the supplied CSV files without re-querying the source, writes run-scoped outputs under `data/transformed/<pipeline_run_id>/` by default, and records quality and audit information. A NULL `expenses.batch_id` is retained as farm-level data and reported separately in `farm_expense_summary.csv`.
 
-PostgreSQL loading is implemented as an optional destination stage. `pipeline.load` writes only approved run-scoped output into the separate `prepapig_etl` schema, requires `PIPELINE_DATABASE_URL`, and requires the migration to be applied explicitly. Recurring scheduling is not yet implemented: `schedule.py` validates a proposed time/timezone and can invoke one run, but it does not register or maintain a daily job. See [`docs/loading.md`](../loading.md) for the target schema and rerun contract.
+PostgreSQL loading is implemented as an optional destination stage. `pipeline.load` writes only approved run-scoped output into the separate `prepapig_etl` schema, requires `PIPELINE_DATABASE_URL`, and requires the migration to be applied explicitly. The optional Node.js Cron scheduler in `scheduler.js` runs Extraction → Transformation → Load when explicitly started with `PREPAPIG_DAILY_TIME` and `PREPAPIG_TIMEZONE`. See [`docs/loading.md`](../loading.md) and [`docs/scheduling.md`](../scheduling.md) for their contracts; neither is part of the BAT 405 midterm scope.
 
 
 ---
@@ -47,8 +47,8 @@ The Stage 2 process records the received extraction run ID and window in its tra
 | Item | Specification |
 |---|---|
 | Transformation technology | Pure Python, consistent with the documented pipeline architecture |
-| Scheduler | Not implemented. The schedule command is one-shot and does not create a recurring job |
-| Frequency | Not configured; daily timing and timezone require approval before a scheduler is enabled |
+| Scheduler | Optional Node.js Cron process; the daily clock time and IANA timezone are required configuration values and no schedule is hard-coded |
+| Frequency | Daily when the Node.js scheduler is running with approved `PREPAPIG_DAILY_TIME` and `PREPAPIG_TIMEZONE` settings; otherwise on demand |
 | Batch size | All records in the four approved CSV files for the received extraction run and its recorded extraction window |
 | Processing mode | Batch transformation |
 | Failed batch handling | Log the failure, keep the input handover unchanged, and rerun the same extraction run after resolving the issue |

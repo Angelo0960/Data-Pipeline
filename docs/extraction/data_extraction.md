@@ -6,7 +6,7 @@ the PrepAPig Farm Management System source system and prepare a
 documented, traceable, and validated raw dataset for the next stage of
 the PrepAPig data pipeline.
 
-> **Repository status:** Python extraction from Supabase is implemented and can be invoked on demand. A recurring Node.js Cron job is not configured or registered in this repository. Scheduling and the daily time described below are proposed deployment behavior, not an active stage.
+> **Repository status:** Python extraction is implemented and can be invoked on demand or by the optional Node.js Cron scheduler. The scheduler requires `PREPAPIG_DAILY_TIME` and `PREPAPIG_TIMEZONE` and runs only when explicitly started; no run time is hard-coded.
 
 The extraction covers the following operational data:
 
@@ -60,7 +60,7 @@ If a table does not contain a usable `created_at` value, the extraction must fla
 
 #### Extraction Process
 
-1. The Python extraction entry point is invoked manually; a recurring scheduler is not enabled.
+1. The Python extraction entry point is run manually or invoked by the configured Node.js Cron scheduler; the schedule process itself must be started by the deployment host.
 2. The Python script records the run start time as the current extraction timestamp.
 3. It reads the previous successful extraction timestamp for each source table.
 4. It connects to the PrepAPig operational database and queries each included table using the incremental window.
@@ -73,7 +73,7 @@ The extraction stage does not perform business transformations or data cleaning 
 
 #### Extraction Tool and Technology
 
-- **Scheduler/orchestrator:** Not implemented; Node.js Cron remains a proposed option pending approval.
+- **Scheduler/orchestrator:** Optional Node.js Cron process in `scheduler.js`; run time and IANA timezone are required configuration values, and the process is started explicitly by its host.
 - **Extraction script:** Python ETL script
 - **Extraction technology:** Python database connection and SQL queries against the PrepAPig operational database
 - **Source system:** PrepAPig operational database
@@ -81,7 +81,7 @@ The extraction stage does not perform business transformations or data cleaning 
 
 #### Extraction Schedule
 
-The repository does not currently run on a daily schedule. The intended future behavior is a daily run at an approved configured time; until a scheduler is configured, extraction is invoked on demand. The implemented extraction logic records a pipeline run ID and extraction window, and failed or unapproved runs do not advance the successful-extraction watermark.
+The repository supports a daily schedule through its optional Node.js Cron entry point. It does not choose a daily clock time or timezone, start the scheduler automatically, or guarantee that a host keeps the process running. Set `PREPAPIG_DAILY_TIME` and `PREPAPIG_TIMEZONE`, then run `npm run validate-schedule` and `npm run schedule`. A failed extraction does not advance its successful-extraction watermark; retry behavior is documented in [`../scheduling.md`](../scheduling.md).
 
 
 ### 1.4. Extraction Scope
