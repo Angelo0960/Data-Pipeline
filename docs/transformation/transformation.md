@@ -6,6 +6,12 @@ The goal of Stage 2 is to transform the validated dataset handed over from the E
 
 This document describes the transformation process for the PrepAPig Batch Data Pipeline. The pipeline processes four farming-related datasets: `pig_batches`, `feed_records`, `vaccination_records`, and `expenses`. Authentication credentials, passwords, API keys, access tokens, and unrelated profile information are outside the transformation scope.
 
+## Repository implementation status
+
+The current code implements an on-demand handover-to-transformation flow. It accepts only an approved handover, reads the supplied CSV files without re-querying the source, writes run-scoped outputs under `data/transformed/<pipeline_run_id>/` by default, and records quality and audit information. A NULL `expenses.batch_id` is retained as farm-level data and reported separately in `farm_expense_summary.csv`.
+
+PostgreSQL loading is **not enabled**: `pipeline/transformation/load.py` stops safely until the target schema, transaction behavior, and conflict/upsert strategy are approved. Recurring scheduling is also **not implemented**: `schedule.py` validates a proposed time/timezone and can invoke one run, but it does not register or maintain a daily job. The remaining sections describe the processing contract and planned behavior; where that contract is not active in code, it should not be read as an enabled production stage.
+
 
 ---
 
@@ -41,8 +47,8 @@ The Stage 2 process records the received extraction run ID and window in its tra
 | Item | Specification |
 |---|---|
 | Transformation technology | Pure Python, consistent with the documented pipeline architecture |
-| Scheduler | Node.js Cron triggers the Python ETL process |
-| Frequency | Daily, at the predefined time configured in Node.js Cron |
+| Scheduler | Not implemented. The schedule command is one-shot and does not create a recurring job |
+| Frequency | Not configured; daily timing and timezone require approval before a scheduler is enabled |
 | Batch size | All records in the four approved CSV files for the received extraction run and its recorded extraction window |
 | Processing mode | Batch transformation |
 | Failed batch handling | Log the failure, keep the input handover unchanged, and rerun the same extraction run after resolving the issue |
@@ -58,7 +64,7 @@ A batch should begin only after the input files and metadata are present and the
 | `pig_batches.csv` | `id`, `batch_code`, `breed`, `status`, `pig_count`, `start_weight`, `current_weight`, `date_acquired`, `created_at` | Optional calculated weight difference: `current_weight - start_weight`, only when both values are valid | Standardized pig batch master data |
 | `feed_records.csv` | `id`, `batch_id`, `feed_type`, `quantity_kg`, `feeding_date`, `feeding_time`, `created_at` | Total feed quantity by batch for the processed batch window; calculate only after validating units and relationships | Clean feed records and batch-level feed summaries |
 | `vaccination_records.csv` | `id`, `batch_id`, `vaccine_name`, `vaccination_date`, `next_due_date`, `administered_by`, `dosage`, `notes`, `status`, `created_at` | Optional due-status indicator based on `next_due_date` and the processing date, if approved as a business rule | Standardized vaccination history and schedule data |
-| `expenses.csv` | `id`, `batch_id`, `expense_type`, `amount`, `expense_date`, `description`, `created_at` | Total expenses by batch and/or expense type for the processed data window | Clean expense records and expense summaries |
+| `expenses.csv` | `id`, optional `batch_id`, `expense_type`, `amount`, `expense_date`, `description`, `created_at` | Batch-linked totals by batch; NULL-`batch_id` farm costs summarized separately by expense type | Clean expense details, `expense_summary.csv`, and `farm_expense_summary.csv` |
 | All four files | Key fields, nulls, duplicates, whitespace, date and numeric formats, valid values, and foreign-key relationships | Record counts and rejected-record counts for audit | Validated transformed datasets and a transformation report |
 
 The original identifiers (`id`, `batch_code`, and `batch_id`) must be preserved to maintain traceability and the relationships between pig batches and their related feed, vaccination, and expense records.
@@ -68,7 +74,7 @@ The original identifiers (`id`, `batch_code`, and `batch_id`) must be preserved 
 1. The Transformation Stage receives the four CSV files from an **approved** Extraction Stage handover; it does not query Supabase or re-extract source records.
 2. `pig_batches` is processed first because it is the parent dataset for the other three tables.
 3. `feed_records`, `vaccination_records`, and `expenses` are processed after the parent batch data is checked.
-4. Child records must reference an existing `pig_batches.id` through `batch_id`. Orphan records are quarantined or held for review rather than silently joined to an unrelated batch.
+4. `feed_records` and `vaccination_records` must reference an existing `pig_batches.id` through `batch_id`. An expense with a non-NULL `batch_id` must also reference an existing batch; a NULL `expenses.batch_id` is valid farm-level data, remains NULL in the detail output, and is summarized separately by `expense_type`.
 5. The source schema and field names follow the Extraction Stage data contract. Unexpected missing columns or incompatible data types cause the batch to fail or be held for review.
 6. The `created_at` field and Extraction Stage extraction window are used for lineage and handover checks. Business dates such as `feeding_date`, `vaccination_date`, and `expense_date` must not be substituted for the extraction watermark without an approved rule.
 7. Late-arriving records created after the current extraction window are expected to appear in a later Extraction Stage batch. Stage 2 must retain the run and window metadata for each processed batch.
@@ -118,7 +124,7 @@ The table below is a **profiling checklist**. The examples are illustrative valu
 | `vaccination_records.csv` | `vaccination_date`, `next_due_date` | Invalid date or inconsistent format | `31/31/2026`; mixed date formats | To be measured | Standardize valid dates; quarantine invalid required dates; see S-01 |
 | `vaccination_records.csv` | `status` | Inconsistent or unexpected status | `completed`; `DONE`; `unknown` | To be measured | Map only approved equivalent values; hold unknown values for review; see S-02 |
 | `expenses.csv` | `id` | Missing or duplicate primary key | Blank ID; repeated UUID | To be measured | Reject or quarantine affected records; see C-01 |
-| `expenses.csv` | `batch_id` | Missing or orphan foreign key | Blank ID; UUID absent from `pig_batches.id` | To be measured | Quarantine record and report missing parent; see R-01 |
+| `expenses.csv` | `batch_id` | Orphan foreign key (NULL is valid for farm-level costs) | UUID absent from `pig_batches.id` | To be measured | Preserve NULL as farm-level expense and summarize separately; quarantine a non-NULL orphan reference; see R-01 |
 | `expenses.csv` | `expense_type` | Missing value or inconsistent text | Blank; ` Feed `; `feed` | To be measured | Trim and normalize approved labels; see C-05 and S-02 |
 | `expenses.csv` | `amount` | Invalid, negative, or non-numeric amount | `abc`; `-25.00` | To be measured | Validate decimal; quarantine negative or invalid amounts unless an approved rule permits refunds/adjustments; see C-04 |
 | `expenses.csv` | `expense_date`, `created_at` | Invalid or inconsistent date format | `10/04/2026`; malformed timestamp | To be measured | Standardize valid values; quarantine unparseable required dates; see S-01 |
@@ -193,16 +199,16 @@ Business transformations prepare the cleaned and standardized records for report
 |---|---|---|
 | D-01 | Weight Change | If required by reporting, calculate `weight_change = current_weight - start_weight` for a batch with valid weights. |
 | D-02 | Feed Summary | Aggregate feed records by batch, such as total `quantity_kg` per `batch_id`. |
-| D-03 | Expense Summary by Batch | Aggregate expense `amount` by `batch_id` to calculate total expenses per batch. |
-| D-04 | Expense Summary by Category | Aggregate expense amounts by `expense_type` for category-level reporting. |
+| D-03 | Expense Summary by Batch | Aggregate only batch-linked expense `amount` values by `batch_id`; farm-level rows are excluded from this batch summary. |
+| D-04 | Farm-Level Expense Summary by Type | Aggregate NULL-`batch_id` expense amounts by `expense_type` and include a record count in `farm_expense_summary.csv`. |
 | D-05 | Vaccination Due Indicator | If required by reporting, derive a due indicator from `next_due_date` relative to the reporting date. |
-| D-06 | Batch and Child-Record Relationship | Join feed, vaccination, and expense records to their parent batch using `batch_id`; retain only valid relationships. |
+| D-06 | Batch and Child-Record Relationship | Join feed, vaccination, and batch-linked expense records to their parent using `batch_id`; preserve farm-level expenses without a batch join. |
 | D-07 | Filtering and Reporting Controls | Exclude invalid/quarantined records from analytical outputs and document the applied filters. |
 
 ### 5.1 Transformation Controls
 
 - Aggregations are calculated only from validated records.
-- Batch-level summaries use `batch_id` as the grouping key.
+- Batch-level summaries use `batch_id` as the grouping key; farm-level expenses are grouped separately by `expense_type`.
 - Date-based indicators use a documented reporting date/time.
 - Derived fields are not treated as source fields; their formulas and assumptions are documented.
 - Transformation errors are logged and do not silently alter source records.
@@ -228,7 +234,7 @@ pig_batches (1)
 
 | Rule ID | Check | Required treatment |
 |---|---|---|
-| R-01 | Each child table's `batch_id` must match a valid `pig_batches.id` | Quarantine orphan records and log the missing parent reference. Do not assign a different batch ID automatically. |
+| R-01 | `feed_records` and `vaccination_records` require a valid `batch_id`; a non-NULL expense `batch_id` must also reference a valid `pig_batches.id` | Quarantine orphan records and log the missing parent reference. Preserve NULL expense `batch_id` as valid farm-level data; do not assign a different batch ID automatically. |
 | R-02 | `pig_batches.id` and all child-table `id` values must be unique within their respective tables | Hold the affected dataset if conflicting IDs are found. |
 | R-03 | `pig_batches.batch_code` must be unique after trimming whitespace | If trimming creates a collision, hold the conflicting records for review. |
 | R-04 | Parent batch data must be validated before child records are joined or aggregated | Process `pig_batches` first, then validate `feed_records`, `vaccination_records`, and `expenses`. |
@@ -320,7 +326,8 @@ PrepAPig-ETL/
 │       ├── vaccination_records_transformed.csv
 │       ├── expenses_transformed.csv
 │       ├── feed_summary.csv
-│       └── expense_summary.csv
+│       ├── expense_summary.csv
+│       └── farm_expense_summary.csv
 └── logs/
     └── transformation/
         ├── transformation_log.csv
@@ -384,11 +391,11 @@ A **quarantined record** is excluded from the business-ready output until it has
 | **C-01 — Missing Primary Key** | `id` in all four tables | The primary key is null, blank, or cannot be interpreted as a valid UUID. | Quarantine the affected record. Do not generate a replacement ID. | The source ID is needed to identify and trace each record reliably. |
 | **C-02 — Duplicate Primary Key** | `id` in all four tables | The same ID occurs more than once in a table. | If the rows are exact duplicates (same ID and all field values), retain one copy and log the extra copies. If values conflict for the same ID, hold the affected dataset for investigation; do not choose a record arbitrarily. | Prevents duplicate or conflicting records from being treated as separate facts. |
 | **C-03 — Duplicate Batch Code** | `pig_batches.batch_code` | A batch code is blank after trimming, or two records have the same batch code after trimming. | Trim surrounding whitespace. Quarantine blank values. Hold collisions for review rather than merging batches. | `batch_code` is a unique business identifier in the source schema. |
-| **C-04 — Missing Required Values** | Required columns: `pig_batches.batch_code`, `pig_batches.pig_count`, `feed_records.batch_id`, `feed_records.feed_type`, `feed_records.quantity_kg`, `feed_records.feeding_date`, `vaccination_records.batch_id`, `vaccination_records.vaccine_name`, `vaccination_records.vaccination_date`, `expenses.batch_id`, `expenses.expense_type`, and `expenses.amount` / `expenses.expense_date` | A required value is null or blank. | Quarantine the affected record. Do not fill missing business values with guessed defaults. | Avoids inventing batch, feed, vaccination, or expense information. |
+| **C-04 — Missing Required Values** | Required columns: `pig_batches.batch_code`, `pig_batches.pig_count`, `feed_records.batch_id`, `feed_records.feed_type`, `feed_records.quantity_kg`, `feed_records.feeding_date`, `vaccination_records.batch_id`, `vaccination_records.vaccine_name`, `vaccination_records.vaccination_date`, `expenses.expense_type`, `expenses.amount`, and `expenses.expense_date` | A required value is null or blank. | Quarantine the affected record. A NULL `expenses.batch_id` is valid farm-level data, not a missing required value. | Avoids inventing batch, feed, vaccination, or expense information. |
 | **C-05 — Invalid Numeric Values** | `pig_batches.pig_count`, `pig_batches.start_weight`, `pig_batches.current_weight`, `feed_records.quantity_kg`, `expenses.amount` | A value cannot be converted to its expected numeric type, is outside the basic permitted range, or has more precision than the approved output precision. | Require `pig_count` to be a non-negative whole number. Require weights and feed quantity to be non-negative decimals. Quarantine non-numeric or negative values. For `expenses.amount`, quarantine negative values unless the project team approves a documented refund or adjustment rule. Do not silently round excess precision. | Prevents invalid counts, weights, quantities, and expense values from distorting reports. |
 | **C-06 — Whitespace and Invalid Text** | Text fields in all four tables, including `batch_code`, `breed`, `status`, `feed_type`, `vaccine_name`, `administered_by`, `expense_type`, `notes`, and `description` | A text value contains leading or trailing whitespace or consists only of whitespace. | Trim leading and trailing whitespace. Treat whitespace-only required values as missing and quarantine the record under C-04. Preserve meaningful internal spaces and punctuation. | Prevents false mismatches while preserving the original meaning of names and descriptions. |
 | **C-07 — Invalid Date or Time** | `date_acquired`, `feeding_date`, `feeding_time`, `vaccination_date`, `next_due_date`, `expense_date`, and `created_at` | A date or time cannot be parsed unambiguously, or a required date is missing. | Quarantine records with invalid required dates or times. An invalid optional date such as `next_due_date` may remain null only if the source contract permits it; record the issue. Do not guess between ambiguous date formats. | Keeps time-based reports accurate and prevents incorrect scheduling information. |
-| **C-08 — Orphan Child Record** | `batch_id` in `feed_records`, `vaccination_records`, and `expenses` | `batch_id` is missing or does not match an accepted `pig_batches.id`. | Quarantine the child record and log the unmatched `batch_id`. Do not assign it to another batch. | Maintains the parent-child relationship and prevents unrelated records from being joined. |
+| **C-08 — Orphan Child Record** | Required `batch_id` in `feed_records` and `vaccination_records`; non-NULL `expenses.batch_id` | A required child `batch_id` is missing, or a supplied `batch_id` does not match an accepted `pig_batches.id`. | Quarantine the affected record and log the unmatched `batch_id`. Preserve a NULL expense `batch_id` as farm-level data. | Maintains valid parent-child relationships without discarding legitimate farm costs. |
 | **C-09 — Unexpected Category or Status** | `pig_batches.status`, `vaccination_records.status`, `breed`, `feed_type`, `vaccine_name`, and `expense_type` | A value does not match an approved reference value or mapping. | Keep the original value for review or quarantine the affected record if the value prevents valid processing. Do not silently convert it to a guessed category. | Preserves source meaning and avoids misleading category-based analysis. |
 | **C-10 — Schema or Required-Column Failure** | All four input files | A file is unreadable, a required column is absent, or the received structure is incompatible with the documented schema. | Stop or hold the batch. Record the file and schema error. Do not silently drop columns or continue with partial input. | Ensures that the transformation uses the agreed Extraction Stage data contract. |
 
@@ -501,10 +508,10 @@ The original source IDs are retained. Summary outputs are kept separate from det
 |---|---|---|---|---|
 | **B-01 — Batch Weight Change** | `pig_batches.start_weight`, `pig_batches.current_weight` | Calculate `current_weight - start_weight` only when both values are valid and non-null. Do not substitute missing weights with zero. | Optional `weight_change` in the transformed pig batch output | Shows the recorded difference between the batch's initial and current weight. |
 | **B-02 — Total Feed per Batch** | `feed_records.batch_id`, `feed_records.quantity_kg` | Group accepted feed records by `batch_id` and sum `quantity_kg` within the defined extraction/reporting window. | `feed_summary.total_feed_kg`, grouped by `batch_id` | Helps measure the feed quantity recorded for each pig batch during the reporting window. |
-| **B-03 — Total Expenses per Batch** | `expenses.batch_id`, `expenses.amount` | Group accepted expense records by `batch_id` and sum `amount` within the defined extraction/reporting window. | `expense_summary.total_expense`, grouped by `batch_id` | Provides a batch-level view of recorded expenses. |
-| **B-04 — Expenses by Type** | `expenses.expense_type`, `expenses.amount` | Group accepted expense records by standardized `expense_type` and sum `amount` within the reporting window. | Optional `expense_type_summary.total_amount` | Supports comparison of spending across expense categories. |
+| **B-03 — Total Expenses per Batch** | Non-NULL `expenses.batch_id`, `expenses.amount` | Group batch-linked accepted expenses by `batch_id` and sum `amount` within the defined extraction/reporting window. | `expense_summary.total_expense`, grouped by `batch_id` | Provides a batch-level view without attributing farm costs to a batch. |
+| **B-04 — Farm-Level Expenses by Type** | NULL-`batch_id` `expenses.expense_type`, `expenses.amount` | Group accepted farm-level expenses by `expense_type`; calculate record count and sum `amount` within the reporting window. | `farm_expense_summary.csv` | Reports farm costs separately without inventing a batch association. |
 | **B-05 — Vaccination Due Indicator** | `vaccination_records.next_due_date`, processing date | If approved by the project team, compare `next_due_date` with the processing date and assign a separate indicator such as `Overdue`, `Due`, or `Upcoming` using a documented threshold. | Optional `vaccination_due_status` | Helps identify vaccination records that may require attention. It must not overwrite the source `status`. |
-| **B-06 — Batch Relationship Lookup** | `pig_batches.id`; `feed_records.batch_id`; `vaccination_records.batch_id`; `expenses.batch_id` | Match each child table's `batch_id` to `pig_batches.id`. Use the validated parent dataset as the lookup source. | Validated child records with preserved `batch_id`; optional reporting join | Connects feed, vaccination, and expense activity to the correct pig batch. |
+| **B-06 — Batch Relationship Lookup** | `pig_batches.id`; `feed_records.batch_id`; `vaccination_records.batch_id`; non-NULL `expenses.batch_id` | Match each required or supplied child `batch_id` to `pig_batches.id`. Use the validated parent dataset as the lookup source. | Validated batch-linked rows; NULL expense rows remain farm-level | Connects only records with a real batch association to that batch. |
 | **B-07 — Reporting Window Attribution** | `created_at`, `window_start`, `window_end`, `pipeline_run_id` | Retain the extraction run ID and its recorded window with the transformed output and summaries. Do not use business dates as a substitute for the extraction watermark. | Run and window metadata associated with each output | Makes each result traceable to the exact extraction batch and supports reproducible reporting. |
 
 ### 5.3 Joins and Lookup Processing
@@ -524,7 +531,7 @@ The transformation stage applies the following join and lookup rules:
 |---|---|---|---|---|
 | `pig_batches` | `feed_records` | `pig_batches.id = feed_records.batch_id` | Validate the child foreign key against the accepted parent IDs before reporting joins. | Quarantine the feed record under R-01. |
 | `pig_batches` | `vaccination_records` | `pig_batches.id = vaccination_records.batch_id` | Validate the child foreign key against the accepted parent IDs before reporting joins. | Quarantine the vaccination record under R-01. |
-| `pig_batches` | `expenses` | `pig_batches.id = expenses.batch_id` | Validate the child foreign key against the accepted parent IDs before reporting joins. | Quarantine the expense record under R-01. |
+| `pig_batches` | Batch-linked `expenses` | `pig_batches.id = expenses.batch_id` | Validate each non-NULL expense foreign key against accepted parent IDs before reporting joins. | Quarantine a non-NULL orphan; retain NULL `batch_id` expenses as farm-level records without joining. |
 
 `pig_batches` is processed first. Child records are checked against the accepted parent IDs before they are joined or aggregated. The transformation must not assign an unmatched child record to a different batch.
 
@@ -535,8 +542,8 @@ For detail-level outputs, retain the original child rows and their `batch_id`. I
 | Summary dataset | Grouping level | Measure | Aggregation | Window |
 |---|---|---|---|---|
 | `feed_summary.csv` | `batch_id` | `quantity_kg` | Sum | Defined extraction/reporting window |
-| `expense_summary.csv` | `batch_id` | `amount` | Sum | Defined extraction/reporting window |
-| Optional expense-by-type summary | `expense_type` | `amount` | Sum | Defined extraction/reporting window |
+| `expense_summary.csv` | Non-NULL `batch_id` | `amount` | Sum | Defined extraction/reporting window |
+| `farm_expense_summary.csv` | `expense_type` for NULL-`batch_id` rows | `amount` and record count | Sum and count | Defined extraction/reporting window |
 
 Only accepted, validated detail records are included in the summaries. Each summary must retain or be associated with `pipeline_run_id`, `window_start`, and `window_end`. Summary totals must be checked against the accepted detail records before handover.
 
@@ -649,7 +656,7 @@ The transformed output preserves the source UUID identifiers and the parent-chil
 | Column | Data Type | Nullable | Key / Constraint | Source or Derivation |
 |---|---|---:|---|---|
 | `id` | UUID | No | Primary key | `expenses.id`; preserve source ID |
-| `batch_id` | UUID | No | Foreign key to `pig_batches.id` | `expenses.batch_id` |
+| `batch_id` | UUID | Yes | Optional foreign key to `pig_batches.id`; NULL denotes a farm-level expense | `expenses.batch_id` |
 | `expense_type` | VARCHAR(100) | No | Required text; trim whitespace | `expenses.expense_type` |
 | `amount` | DECIMAL(12,2) | No | Non-negative amount; preserve numeric meaning | `expenses.amount`; standardized from source decimal |
 | `expense_date` | DATE | No | Valid date | `expenses.expense_date` |
@@ -665,6 +672,17 @@ The transformed output preserves the source UUID identifiers and the parent-chil
 | `pipeline_run_id` | VARCHAR | No | Extraction run lineage identifier | Extraction handover metadata |
 | `window_start` | TIMESTAMP | No | Extraction window boundary | Extraction handover metadata |
 | `window_end` | TIMESTAMP | No | Extraction window boundary | Extraction handover metadata |
+
+### 6.1.7 Farm-Level Expense Summary Dataset — `farm_expense_summary`
+
+| Column | Data Type | Nullable | Key / Constraint | Source or Derivation |
+|---|---|---:|---|---|
+| `expense_type` | VARCHAR(100) | No | Grouping key | `expenses.expense_type` for rows whose `batch_id` is NULL |
+| `record_count` | INTEGER | No | Count of included source rows | Count farm-level expense records per type |
+| `total_expense` | DECIMAL(12,2) | No | Non-negative aggregate | Sum of `amount` per type |
+| `pipeline_run_id` | VARCHAR | No | Extraction run lineage identifier | Extraction handover metadata |
+| `window_start` | TIMESTAMP | Yes | Extraction window boundary | Extraction handover metadata |
+| `window_end` | TIMESTAMP | Yes | Extraction window boundary | Extraction handover metadata |
 
 **Schema notes**
 
@@ -722,7 +740,7 @@ The source UUID primary keys are retained as `id`. Child tables use `batch_id` a
 pig_batches.id
     ├── feed_records.batch_id
     ├── vaccination_records.batch_id
-    └── expenses.batch_id
+    └── expenses.batch_id (optional; NULL means farm-level)
 ```
 
 Summary datasets use `batch_id` as their grouping and relationship field. No new surrogate key is required for the documented relational output.
@@ -764,14 +782,15 @@ The mapping below shows how source fields are cleaned, standardized, preserved, 
 | `vaccination_records.created_at` | `created_at` | TIMESTAMP | TIMESTAMP | Validate and standardize timestamp (C-07, S-08) |
 | `vaccination_records.next_due_date`, processing date | `vaccination_due_status` | DATE, processing date | VARCHAR(20) | Derive due indicator only when the business rule is approved (B-05) |
 | `expenses.id` | `id` | UUID | UUID | Validate and preserve source primary key (C-01, S-01) |
-| `expenses.batch_id` | `batch_id` | UUID | UUID | Preserve foreign key and validate against `pig_batches.id` (C-08, R-01) |
+| `expenses.batch_id` | `batch_id` | UUID, nullable | UUID, nullable | Preserve NULL for farm-level rows; validate only non-NULL references against `pig_batches.id` (C-08, R-01) |
 | `expenses.expense_type` | `expense_type` | VARCHAR | VARCHAR(100) | Validate required value and trim whitespace (C-04, C-06, S-10) |
 | `expenses.amount` | `amount` | DECIMAL(10,2) | DECIMAL(12,2) | Validate numeric and non-negative value; preserve amount without assigning an undocumented currency (C-05, S-06) |
 | `expenses.expense_date` | `expense_date` | DATE | DATE | Parse and standardize to `YYYY-MM-DD` (C-07, S-07) |
 | `expenses.description` | `description` | TEXT | TEXT | Trim surrounding whitespace; preserve content and NULL when optional (C-06, S-11) |
 | `expenses.created_at` | `created_at` | TIMESTAMP | TIMESTAMP | Validate and standardize timestamp (C-07, S-08) |
-| `expenses.batch_id`, `expenses.amount` | `expense_summary.batch_id`, `expense_summary.total_expense` | UUID, DECIMAL(10,2) | UUID, DECIMAL(12,2) | Sum accepted `amount` by `batch_id` for the recorded window (B-03) |
-| Extraction metadata | `expense_summary.pipeline_run_id`, `window_start`, `window_end` | Metadata values | VARCHAR, TIMESTAMP, TIMESTAMP | Preserve extraction run and window for lineage (B-07) |
+| Non-NULL `expenses.batch_id`, `expenses.amount` | `expense_summary.batch_id`, `expense_summary.total_expense` | UUID, DECIMAL(10,2) | UUID, DECIMAL(12,2) | Sum batch-linked accepted `amount` by `batch_id` (B-03) |
+| NULL-`batch_id` `expenses.expense_type`, `expenses.amount` | `farm_expense_summary.expense_type`, `record_count`, `total_expense` | VARCHAR, DECIMAL(10,2) | VARCHAR(100), INTEGER, DECIMAL(12,2) | Group farm-level expenses by type; count and sum (B-04) |
+| Extraction metadata | `expense_summary` and `farm_expense_summary` run/window fields | Metadata values | VARCHAR, TIMESTAMP, TIMESTAMP | Preserve extraction run and window for lineage in both summaries (B-07) |
 
 ## 6.4 Schema Consistency and Change Handling
 
@@ -969,7 +988,8 @@ The Transformation Stage provides the following items to the Loading Stage:
 | `feed_summary.csv` | Total accepted feed quantity by `batch_id` for the recorded window |
 | `vaccination_records_transformed.csv` | Accepted vaccination records with standardized dates and values |
 | `expenses_transformed.csv` | Accepted expense records with valid batch relationships |
-| `expense_summary.csv` | Total accepted expenses by `batch_id` for the recorded window |
+| `expense_summary.csv` | Total batch-linked expenses by `batch_id` for the recorded window |
+| `farm_expense_summary.csv` | Total and record count of farm-level expenses by `expense_type` for the recorded window |
 | Data-quality report | Profiling results, validation outcomes, record counts, applied rules, and quarantine reasons |
 | Transformation log | Run identifiers, extraction window, timestamps, counts, status, output location, and errors |
 | Acceptance result | `APPROVED`, `MANUAL REVIEW`, or `REJECTED`, with the decision reason |

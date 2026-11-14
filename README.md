@@ -9,7 +9,7 @@
 
 ## Pipeline Overview
 
-The **PrepAPig Batch Data Pipeline** processes accumulated pig-farming data in batches for reporting and analytics. It extracts records from the PrepAPig operational database, validates and transforms them using Python, and loads the processed results into a separate PostgreSQL database.
+The **PrepAPig Batch Data Pipeline** extracts accumulated pig-farming data from the PrepAPig operational database, validates it, and transforms it into run-scoped CSV outputs. The PostgreSQL destination loader and recurring scheduler are not enabled yet; both remain pending their configuration and approval.
 
 The pipeline covers these farming-related datasets:
 
@@ -18,26 +18,29 @@ The pipeline covers these farming-related datasets:
 - Vaccination records
 - Expenses
 
+An expense may be batch-specific or farm-level. A NULL `expenses.batch_id` is preserved in the transformed detail CSV and summarized separately by `expense_type`; it is not assigned to a pig batch.
+
 User credentials, authentication tokens, and unrelated profile data are outside the ETL scope.
 
 ## Pipeline Architecture
 
-Node.js Cron schedules and triggers the Python ETL script. The Python process performs the following steps:
+The implemented pipeline is run on demand; there is no recurring scheduler registered by this repository. The current Python stages perform:
 
 1. Extract accumulated farming records from the PrepAPig operational database.
 2. Validate and clean the extracted data.
 3. Calculate, transform, and aggregate the records.
-4. Load the processed data into a separate PostgreSQL database.
-5. Make the processed data available for reports and analytics.
+4. Write run-scoped transformed CSV files, quality reports, and audit logs.
+
+**Planned, not enabled:** load transformed data into a separate PostgreSQL database and configure a recurring schedule after the destination schema, load strategy, run time, and timezone are approved. The loader currently stops safely rather than writing to an unconfigured destination.
 
 ### Technologies
 
-| Technology | Role |
+| Technology | Role / status |
 |---|---|
 | PrepAPig operational database | Source of accumulated farming data |
-| Python | ETL processing, validation, cleaning, transformation, calculations, aggregation, and loading |
-| Node.js Cron | Scheduling and orchestration of batch ETL execution |
-| PostgreSQL | Destination database for processed ETL results and analytics |
+| Python | Implemented extraction, validation, transformation, calculations, summaries, and CSV/audit output |
+| Scheduler | Not implemented; the schedule command is a one-shot entry point and does not register a recurring job |
+| PostgreSQL | Planned destination; the load stage is disabled until its schema and upsert/transaction strategy are approved |
 
 ## Data Lineage
 
@@ -48,18 +51,24 @@ PrepAPig operational database
    Python batch extraction
             │
             ▼
- Validation, cleaning, transformation,
-       calculations, aggregation
+ Validation, handover, transformation
             │
             ▼
- Separate PostgreSQL database
-            │
+ Run-scoped CSV outputs and audit logs  [implemented]
+            :
+            : (planned after destination approval)
             ▼
-     Reports and analytics
+ Separate PostgreSQL database → reports and analytics
 ```
 
-The pipeline runs on a predefined batch schedule and depends on the PrepAPig operational database, the Python environment, Node.js Cron, the PostgreSQL database, configuration settings, and valid application data.
+The current pipeline is invoked on demand and depends on the PrepAPig operational database, the Python environment, configuration settings, and valid application data. Recurring scheduling and PostgreSQL loading are not active dependencies until those stages are configured.
 
 ## Extraction run logging
 
 Each run creates a unique `pipeline_run_id`, records `SUCCESS`, `WARNING`, or `FAILED`, and produces table-level metadata, validation results, and a handover decision (`APPROVED`, `MANUAL REVIEW`, or `REJECTED`). Operational logs and audit records follow the storage and retention rules in [`docs/extraction/data_extraction.md`](docs/extraction/data_extraction.md).
+
+## Current implementation status
+
+- **Implemented:** extraction handover checks, transformation, farm-level expense summaries, quality reports, and run-scoped audit output.
+- **Not enabled:** PostgreSQL loading and recurring scheduling. `pipeline/transformation/load.py` fails closed until a destination contract is approved; `schedule.py` validates settings and invokes one run but does not schedule future runs.
+- **Manual run:** invoke the orchestrator with the extracted CSV directory and its metadata file: `python -m pipeline.transformation.orchestrate --input-dir <extraction-csv-dir> --metadata <extraction-metadata.json> --output-dir data`.

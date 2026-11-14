@@ -6,6 +6,8 @@ the PrepAPig Farm Management System source system and prepare a
 documented, traceable, and validated raw dataset for the next stage of
 the PrepAPig data pipeline.
 
+> **Repository status:** Python extraction from Supabase is implemented and can be invoked on demand. A recurring Node.js Cron job is not configured or registered in this repository. Scheduling and the daily time described below are proposed deployment behavior, not an active stage.
+
 The extraction covers the following operational data:
 
 -   Pig batch records
@@ -58,7 +60,7 @@ If a table does not contain a usable `created_at` value, the extraction must fla
 
 #### Extraction Process
 
-1. Node.js Cron starts the scheduled Python ETL script.
+1. The Python extraction entry point is invoked manually; a recurring scheduler is not enabled.
 2. The Python script records the run start time as the current extraction timestamp.
 3. It reads the previous successful extraction timestamp for each source table.
 4. It connects to the PrepAPig operational database and queries each included table using the incremental window.
@@ -71,7 +73,7 @@ The extraction stage does not perform business transformations or data cleaning 
 
 #### Extraction Tool and Technology
 
-- **Scheduler/orchestrator:** Node.js Cron
+- **Scheduler/orchestrator:** Not implemented; Node.js Cron remains a proposed option pending approval.
 - **Extraction script:** Python ETL script
 - **Extraction technology:** Python database connection and SQL queries against the PrepAPig operational database
 - **Source system:** PrepAPig operational database
@@ -79,7 +81,7 @@ The extraction stage does not perform business transformations or data cleaning 
 
 #### Extraction Schedule
 
-The pipeline runs **once per day** at the predefined time configured in Node.js Cron. The exact clock time is controlled by the deployment configuration. Each scheduled run creates a new pipeline run ID and extraction window. Failed runs do not advance the successful-extraction watermark; the next run retries the unprocessed window.
+The repository does not currently run on a daily schedule. The intended future behavior is a daily run at an approved configured time; until a scheduler is configured, extraction is invoked on demand. The implemented extraction logic records a pipeline run ID and extraction window, and failed or unapproved runs do not advance the successful-extraction watermark.
 
 
 ### 1.4. Extraction Scope
@@ -112,7 +114,7 @@ The extraction process assumes that:
 3.  The required columns and identifiers are present.
 4.  The Python environment can establish the required database
     connection.
-5.  Node.js Cron can successfully trigger the Python extraction process.
+5.  A future approved scheduler can trigger the Python extraction process; no scheduler is currently enabled.
 6.  The source schema remains compatible with the documented ETL
     structure.
 7.  Source data required by the pipeline is available and readable.
@@ -185,19 +187,19 @@ The extraction scope includes the farming data required by the PrepAPig batch pi
 
 ### 2.4 `expenses`
 
-**Purpose:** Records expenses associated with each pig batch.
+**Purpose:** Records expenses associated with a pig batch or, when `batch_id` is NULL, farm-level expenses.
 
 | Column | Data type | Key or constraint | Description |
 |---|---|---|---|
 | `id` | UUID | Primary key | Unique identifier for the expense record. |
-| `batch_id` | UUID | Foreign key to `pig_batches(id)` | Identifies the related pig batch. |
+| `batch_id` | UUID | Optional foreign key to `pig_batches(id)` | Identifies the related pig batch; NULL denotes a farm-level expense. |
 | `expense_type` | VARCHAR(100) | Not null | Type or category of the expense. |
 | `amount` | DECIMAL(10,2) | Not null | Amount of the expense. |
 | `expense_date` | DATE | — | Date when the expense occurred. |
 | `description` | TEXT | — | Additional details about the expense. |
 | `created_at` | TIMESTAMP | Default `NOW()` | Date and time the expense record was created. |
 
-**Relevant relationships:** Many expense records can belong to one `pig_batches` record through `batch_id`.
+**Relevant relationships:** A batch-specific expense references `pig_batches.id` through `batch_id`; a farm-level expense has no batch relationship.
 
 **Reason for inclusion:** Provides cost data needed for expense aggregation and financial reporting related to pig batches.
 
@@ -210,7 +212,7 @@ pig_batches (1)
     └── expenses (many)
 ```
 
-The `batch_id` foreign key in each child table links extracted records to their parent pig batch. These relationships must be preserved in the extracted dataset so downstream processing can join records accurately.
+`feed_records.batch_id` and `vaccination_records.batch_id` must link each record to its parent pig batch. `expenses.batch_id` is optional: when non-NULL it must reference `pig_batches.id`; when NULL the expense is farm-level and must be preserved separately rather than joined to a batch.
 
 
 
@@ -231,7 +233,7 @@ Validation is performed after the Python extraction script retrieves records fro
 | **Primary Key Presence Check**   | `id` column of all four tables                                      | Ensure every extracted record has its required unique identifier.                              | **PASS:** No extracted record has a NULL or missing `id`. **FAIL:** One or more extracted records have a missing or NULL `id`.                                                        |
 | **Primary Key Uniqueness Check** | `id` column of all four tables                                      | Detect duplicate identifiers within the extracted records.                                     | **PASS:** Number of unique `id` values equals the number of extracted records. **FAIL:** Duplicate `id` values are detected.                                                          |
 | **Batch Code Uniqueness Check**  | `pig_batches.batch_code`                                            | Verify the documented UNIQUE constraint of pig batch codes.                                    | **PASS:** Every extracted `batch_code` is unique. **FAIL:** Duplicate batch codes are detected.                                                                                       |
-| **Foreign Key Presence Check**   | `batch_id` in `feed_records`, `vaccination_records`, and `expenses` | Ensure child records contain the identifier required to associate them with a pig batch.       | **PASS:** Required `batch_id` values are present. **FAIL:** A required `batch_id` is missing or NULL.                                                                                 |
+| **Foreign Key Relationship Check** | `batch_id` in child tables | Ensure required relationships are present and every non-NULL foreign key references a valid batch. | **PASS:** Feed/vaccination `batch_id` values are present; non-NULL expense `batch_id` values are valid; NULL expense values are classified as farm-level information. **FAIL:** A required value is missing or a non-NULL reference is orphaned. |
 | **Extraction Window Check**      | `created_at`                                                        | Verify that incremental extraction returns records belonging to the defined extraction window. | **PASS:** Every extracted record satisfies `previous_successful_extraction < created_at <= current_extraction_time`. **FAIL:** A returned record falls outside the extraction window. |
 | **Record Count Check**           | Supabase API result and generated CSV                               | Verify that all records retrieved during the extraction are written to the extraction output.  | **PASS:** Number of successfully extracted API records equals the number of data rows written to the CSV. **FAIL:** Counts do not match.                                              |
 | **Extraction Error Check**       | Python extraction process                                           | Detect errors or interruptions during extraction.                                              | **PASS:** Extraction completes without a critical error. **FAIL:** API, network, authentication, script, or file-writing error prevents successful extraction.                        |
@@ -599,7 +601,7 @@ The extraction must preserve the following identifiers:
 - `expenses.id` — Primary Key
 - `feed_records.batch_id` → `pig_batches.id`
 - `vaccination_records.batch_id` → `pig_batches.id`
-- `expenses.batch_id` → `pig_batches.id`
+- `expenses.batch_id` → `pig_batches.id` when `batch_id` is non-NULL; NULL denotes a farm-level expense.
 
 The `batch_code` field in `pig_batches` must remain unique.
 
@@ -750,8 +752,8 @@ The following table identifies realistic extraction problems, their possible cau
 | **Invalid or missing `created_at` values** | Source records contain null, malformed, or unexpected timestamp values. | Incremental extraction may skip records or extract records outside the intended window, resulting in missing or duplicated data across runs. | Validate the `created_at` field before applying the incremental filter. Records that cannot be reliably evaluated should not be silently included or excluded. Flag the issue for review and retain the previous watermark when the extraction cannot be trusted. |
 | **Incorrect incremental extraction window** | Incorrect watermark, incorrect comparison operators, timestamp conversion problems, or failure to use the fixed extraction timestamp for the current run. | Records may be duplicated, skipped, or extracted more than once across consecutive runs. | Use the defined window: `last_successful_extraction_timestamp < created_at <= current_extraction_timestamp`. Capture `current_extraction_timestamp` once at the beginning of the run and only update the watermark after successful validation and handover. |
 | **Duplicate primary keys detected** | Duplicate source records, source integrity problems, or an extraction/query error. | Duplicate records may cause the extracted dataset to violate the expected source structure and may affect downstream relationships. | Validate primary key uniqueness after extraction. Mark the validation as **FAIL** for critical duplicate-key violations and do not approve the dataset for Transformation until the issue is investigated. |
-| **Missing primary key or `batch_id` values** | Incomplete source records or source data integrity problems. | Records cannot be reliably identified or associated with their corresponding pig batch. This can affect downstream relationships and validation. | Check required identifiers during extraction validation. Flag invalid records and prevent approval when the missing identifier affects a critical relationship. |
-| **Invalid foreign-key relationship** | A `feed_records`, `vaccination_records`, or `expenses` record references a `batch_id` that does not exist in `pig_batches`. | The extracted data may contain orphan records that cannot be reliably related to a pig batch during Transformation. | Validate foreign-key relationships before handover. Record the affected rows in the validation results and classify the extraction as **WARNING**, **MANUAL REVIEW**, or **REJECTED** depending on the severity and number of affected records. |
+| **Missing primary key or required `batch_id` values** | Incomplete source records or source data integrity problems. | Records cannot be reliably identified or associated with their corresponding pig batch. A NULL expense `batch_id` is the documented exception and denotes a farm-level expense. | Require IDs and feed/vaccination batch IDs. Preserve NULL expense batch IDs as informational farm-level records; prevent approval for other missing critical relationships. |
+| **Invalid foreign-key relationship** | A `feed_records`, `vaccination_records`, or batch-linked `expenses` record references a `batch_id` that does not exist in `pig_batches`. | The extracted data may contain orphan records that cannot be reliably related to a pig batch during Transformation. | Validate every required or non-NULL foreign key before handover. Record orphan rows and prevent approval until resolved. |
 | **Incomplete results due to API pagination or query limits** | The Supabase API or extraction query returns only part of the requested records because of pagination or result-size limits. | The extracted dataset contains fewer records than the source for the specified extraction window, causing incomplete data handover. | Implement pagination or appropriate query handling in the Python ETL script. Compare extracted record counts with the expected query results and do not approve the extraction when completeness cannot be confirmed. |
 | **Network interruption during extraction** | Unstable internet connection, temporary network failure, or connection timeout. | The extraction may stop partway through, producing incomplete output or an unsuccessful run. | Use controlled retry handling for temporary connection failures. If the extraction cannot be completed, mark the run as **FAILED**, discard incomplete output, retain the previous watermark, and retry the same window on the next run. |
 | **Python ETL script terminates unexpectedly** | Programming error, unhandled exception, insufficient system resources, or unexpected source data. | The extraction may stop before all required tables are processed, resulting in incomplete output. | Capture exceptions and write an error message to the extraction log without exposing credentials or sensitive connection information. Mark the run as **FAILED** and investigate the error before approving the output. |
