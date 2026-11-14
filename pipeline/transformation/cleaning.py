@@ -108,24 +108,62 @@ def clean_records(raw_by_table: dict[str, list[dict[str, str]]], headers_by_tabl
     for table in TABLES:
         rows = raw_by_table[table]
         accepted_rows: list[dict[str, str]] = []
-        seen_ids: dict[str, tuple[tuple[str, str], ...]] = {}
-        duplicates = 0
         counts: Counter[str] = Counter()
-        for line_number, source in enumerate(rows, start=2):
-            signature = tuple(sorted((key, value or "") for key, value in source.items()))
+        id_groups: dict[str, list[tuple[int, tuple[tuple[str, str], ...]]]] = {}
+        for index, source in enumerate(rows):
             source_id = str(source.get("id", "")).strip()
             try:
                 normalized_id = str(uuid.UUID(source_id)) if source_id else ""
             except ValueError:
                 normalized_id = ""
             if normalized_id:
-                if normalized_id in seen_ids:
-                    if signature == seen_ids[normalized_id]:
-                        duplicates += 1
-                        counts["C-02-exact-duplicate"] += 1
-                        continue
-                    raise BatchCleaningError(f"{table}: conflicting records share id {normalized_id}; hold batch for review")
-                seen_ids[normalized_id] = signature
+                signature = tuple(sorted((key, value or "") for key, value in source.items()))
+                id_groups.setdefault(normalized_id, []).append((index, signature))
+
+        conflicting: dict[int, tuple[str, str]] = {}
+        exact_duplicate_indices: set[int] = set()
+        for normalized_id, entries in id_groups.items():
+            signatures = {signature for _, signature in entries}
+            if len(signatures) > 1:
+                for index, _ in entries:
+                    conflicting[index] = ("C-02", f"Conflicting rows share source id {normalized_id}; all copies quarantined")
+            else:
+                exact_duplicate_indices.update(index for index, _ in entries[1:])
+
+        if table == "pig_batches":
+            code_groups: dict[str, list[int]] = {}
+            for index, source in enumerate(rows):
+                code = str(source.get("batch_code", "")).strip()
+                if code and index not in exact_duplicate_indices and index not in conflicting:
+                    code_groups.setdefault(code, []).append(index)
+            for code, indices in code_groups.items():
+                distinct_ids = {str(rows[index].get("id", "")).strip() for index in indices}
+                if len(indices) > 1 and len(distinct_ids) > 1:
+                    for index in indices:
+                        conflicting[index] = ("C-03", f"Duplicate batch_code after trimming: {code}; all colliding rows quarantined")
+
+        duplicates = len(exact_duplicate_indices)
+        counts["C-02-exact-duplicate"] += duplicates
+        for line_index, source in enumerate(rows):
+            line_number = line_index + 2
+            source_id = str(source.get("id", "")).strip()
+            if line_index in exact_duplicate_indices:
+                continue
+            if line_index in conflicting:
+                rule_id, reason = conflicting[line_index]
+                quarantine.append({
+                    "pipeline_run_id": pipeline_run_id,
+                    "table_name": table,
+                    "source_row": str(line_number),
+                    "source_id": source_id,
+                    "rule_id": rule_id,
+                    "field": "id" if rule_id == "C-02" else "batch_code",
+                    "reason": reason,
+                    "record_json": json.dumps(source, ensure_ascii=False, sort_keys=True),
+                })
+                counts[rule_id] += 1
+                counts["quarantined"] += 1
+                continue
             try:
                 clean = standardize_record(table, source)
                 if table != "pig_batches":
@@ -151,12 +189,6 @@ def clean_records(raw_by_table: dict[str, list[dict[str, str]]], headers_by_tabl
                 counts[exc.rule_id] += 1
                 counts["quarantined"] += 1
         if table == "pig_batches":
-            codes: dict[str, str] = {}
-            for row in accepted_rows:
-                code = row["batch_code"].strip()
-                if code in codes and codes[code] != row["id"]:
-                    raise BatchCleaningError(f"pig_batches: duplicate batch_code after trimming: {code}")
-                codes[code] = row["id"]
             parent_ids = {row["id"] for row in accepted_rows}
         accepted[table] = accepted_rows
         duplicate_counts[table] = duplicates
