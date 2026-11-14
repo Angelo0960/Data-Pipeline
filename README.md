@@ -9,7 +9,7 @@
 
 ## Pipeline Overview
 
-The **PrepAPig Batch Data Pipeline** extracts accumulated pig-farming data from the PrepAPig operational database, validates it, and transforms it into run-scoped CSV outputs. The PostgreSQL destination loader and recurring scheduler are not enabled yet; both remain pending their configuration and approval.
+The **PrepAPig Batch Data Pipeline** extracts accumulated pig-farming data from the PrepAPig operational database, validates and transforms it into run-scoped outputs, and can load approved outputs into a separate PostgreSQL destination. A configurable recurring scheduler is delivered separately and requires its run time and IANA timezone to be set in the deployment environment.
 
 The pipeline covers these farming-related datasets:
 
@@ -31,7 +31,7 @@ The implemented pipeline is run on demand; there is no recurring scheduler regis
 3. Calculate, transform, and aggregate the records.
 4. Write run-scoped transformed CSV files, quality reports, and audit logs.
 
-**Planned, not enabled:** load transformed data into a separate PostgreSQL database and configure a recurring schedule after the destination schema, load strategy, run time, and timezone are approved. The loader currently stops safely rather than writing to an unconfigured destination.
+**Implemented:** load transformed data into the separate `prepapig_etl` PostgreSQL schema. The destination is configured with `PIPELINE_DATABASE_URL`; apply the migration once with `python -m pipeline.load --migrate-only`. Re-loading a pipeline run atomically replaces only that run's records. The recurring scheduler is a separate follow-on and is not started unless explicitly configured.
 
 ### Technologies
 
@@ -40,7 +40,7 @@ The implemented pipeline is run on demand; there is no recurring scheduler regis
 | PrepAPig operational database | Source of accumulated farming data |
 | Python | Implemented extraction, validation, transformation, calculations, summaries, and CSV/audit output |
 | Scheduler | Not implemented; the schedule command is a one-shot entry point and does not register a recurring job |
-| PostgreSQL | Planned destination; the load stage is disabled until its schema and upsert/transaction strategy are approved |
+| PostgreSQL | Separate destination implemented in the `prepapig_etl` schema; set `PIPELINE_DATABASE_URL` and apply `migrations/001_pipeline_load.sql` before loading |
 
 ## Data Lineage
 
@@ -55,13 +55,12 @@ PrepAPig operational database
             │
             ▼
  Run-scoped CSV outputs and audit logs  [implemented]
-            :
-            : (planned after destination approval)
-            ▼
- Separate PostgreSQL database → reports and analytics
+             │
+             ▼
+ Separate PostgreSQL database → reports and analytics  [optional load stage; configured separately]
 ```
 
-The current pipeline is invoked on demand and depends on the PrepAPig operational database, the Python environment, configuration settings, and valid application data. Recurring scheduling and PostgreSQL loading are not active dependencies until those stages are configured.
+The extraction and transformation stages can be invoked on demand. PostgreSQL loading is optional and requires the separate destination URL and migration; the recurring scheduler is enabled only when its time and timezone are configured.
 
 ## Extraction run logging
 
@@ -69,6 +68,6 @@ Each run creates a unique `pipeline_run_id`, records `SUCCESS`, `WARNING`, or `F
 
 ## Current implementation status
 
-- **Implemented:** extraction handover checks, transformation, farm-level expense summaries, quality reports, and run-scoped audit output.
-- **Not enabled:** PostgreSQL loading and recurring scheduling. `pipeline/transformation/load.py` fails closed until a destination contract is approved; `schedule.py` validates settings and invokes one run but does not schedule future runs.
-- **Manual run:** invoke the orchestrator with the extracted CSV directory and its metadata file: `python -m pipeline.transformation.orchestrate --input-dir <extraction-csv-dir> --metadata <extraction-metadata.json> --output-dir data`.
+- **Implemented:** extraction handover checks, transformation, farm-level expense summaries, quality reports, run-scoped audit output, and PostgreSQL loading. The load contract and setup steps are in [`docs/loading.md`](docs/loading.md).
+- **Scheduler:** recurring Node.js Cron integration is delivered separately; configure its time and timezone before starting it.
+- **Manual load:** `python -m pipeline.load data/transformed/<pipeline_run_id>` loads only a PASS/APPROVED bundle after the migration is applied and `PIPELINE_DATABASE_URL` is set.

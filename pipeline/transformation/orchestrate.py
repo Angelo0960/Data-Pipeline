@@ -99,8 +99,11 @@ def run_from_extraction(input_dir: Path, metadata_path: Path, output_dir: Path, 
         return result.returncode
     if load:
         bundle = output_dir.resolve() / "transformed" / str(handover["pipeline_run_id"])
-        load_script = Path(__file__).resolve().with_name("load.py")
-        load_result = subprocess.run([sys.executable, str(load_script), str(bundle)], check=False)
+        load_result = subprocess.run(
+            [sys.executable, "-m", "pipeline.load", str(bundle)],
+            check=False,
+            cwd=project_root,
+        )
         return load_result.returncode
     return 0
 
@@ -110,7 +113,7 @@ def main() -> int:
     parser.add_argument("--input-dir", required=True, type=Path, help="Extraction output folder")
     parser.add_argument("--metadata", required=True, type=Path, help="Extraction audit metadata JSON")
     parser.add_argument("--output-dir", type=Path, default=Path("data"))
-    parser.add_argument("--load", action="store_true", help="Attempt the separate load stage (currently fail-closed until configured)")
+    parser.add_argument("--load", action="store_true", help="Load the approved output bundle into the configured PostgreSQL destination")
     args = parser.parse_args()
     try:
         return run_from_extraction(args.input_dir, args.metadata, args.output_dir, load=args.load)

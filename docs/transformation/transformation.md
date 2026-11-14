@@ -2,15 +2,15 @@
 
 ## Objective
 
-The goal of Stage 2 is to transform the validated dataset handed over from the Extraction Stage into a cleaned, standardized, and business-ready dataset. The transformation process must be documented, traceable, and validated before Stage 2 is marked complete. Database loading is a separate follow-on stage and is outside the BAT 405 midterm scope.
+The goal of Stage 2 is to transform the validated dataset handed over from the Extraction Stage into a cleaned, standardized, and business-ready dataset. The transformation process must be documented, traceable, and validated before Stage 2 is marked complete. PostgreSQL loading is a separate, implemented follow-on stage outside the BAT 405 midterm scope.
 
-This document describes the transformation process for the PrepAPig Batch Data Pipeline. The BAT 405 midterm deliverable covers **Stage 1: Extraction** and **Stage 2: Transformation** only. PostgreSQL loading and recurring scheduling are follow-on work, not midterm acceptance criteria; they remain disabled and are documented only as future scope. The pipeline processes four farming-related datasets: `pig_batches`, `feed_records`, `vaccination_records`, and `expenses`. Authentication credentials, passwords, API keys, access tokens, and unrelated profile information are outside the transformation scope.
+This document describes the transformation process for the PrepAPig Batch Data Pipeline. The BAT 405 midterm deliverable covers **Stage 1: Extraction** and **Stage 2: Transformation** only. PostgreSQL loading is implemented as a separate post-midterm stage; recurring scheduling is follow-on work and is not yet configured. The pipeline processes four farming-related datasets: `pig_batches`, `feed_records`, `vaccination_records`, and `expenses`. Authentication credentials, passwords, API keys, access tokens, and unrelated profile information are outside the transformation scope.
 
 ## Repository implementation status
 
 The current code implements an on-demand handover-to-transformation flow. It accepts only an approved handover, reads the supplied CSV files without re-querying the source, writes run-scoped outputs under `data/transformed/<pipeline_run_id>/` by default, and records quality and audit information. A NULL `expenses.batch_id` is retained as farm-level data and reported separately in `farm_expense_summary.csv`.
 
-PostgreSQL loading is **not enabled**: `pipeline/transformation/load.py` stops safely until the target schema, transaction behavior, and conflict/upsert strategy are approved. Recurring scheduling is also **not implemented**: `schedule.py` validates a proposed time/timezone and can invoke one run, but it does not register or maintain a daily job. The remaining sections describe the processing contract and planned behavior; where that contract is not active in code, it should not be read as an enabled production stage.
+PostgreSQL loading is implemented as an optional destination stage. `pipeline.load` writes only approved run-scoped output into the separate `prepapig_etl` schema, requires `PIPELINE_DATABASE_URL`, and requires the migration to be applied explicitly. Recurring scheduling is not yet implemented: `schedule.py` validates a proposed time/timezone and can invoke one run, but it does not register or maintain a daily job. See [`docs/loading.md`](../loading.md) for the target schema and rerun contract.
 
 
 ---
