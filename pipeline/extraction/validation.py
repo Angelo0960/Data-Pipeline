@@ -115,8 +115,9 @@ def validate_extraction(
 ) -> dict[str, Any]:
     """Validate records and return PASS/WARNING/FAIL plus handover decision.
 
-    `expenses.batch_id` may be null for farm-level expenses and produces a
-    warning. All other missing or invalid required relationships fail.
+    A null `expenses.batch_id` is valid for a farm-level expense and is recorded
+    as informational. Missing or invalid relationships in other child tables,
+    and non-null orphan expense relationships, fail validation.
     """
     start = parse_timestamp(window_start)
     end = parse_timestamp(window_end)
@@ -125,6 +126,7 @@ def validate_extraction(
 
     failures: list[str] = []
     warnings: list[str] = []
+    information: list[str] = []
     table_results: dict[str, dict[str, Any]] = {}
     normalized: dict[str, list[dict[str, Any]]] = {}
 
@@ -145,6 +147,7 @@ def validate_extraction(
         duplicate_ids = _unique_duplicates(ids)
         table_failures: list[str] = []
         table_warnings: list[str] = []
+        table_information: list[str] = []
 
         if missing_columns:
             table_failures.append(f"{table}: missing columns {', '.join(missing_columns)}")
@@ -187,6 +190,7 @@ def validate_extraction(
             "records_rejected": 0,
             "failures": table_failures,
             "warnings": table_warnings,
+            "information": table_information,
             "validation_result": "FAIL" if table_failures else "PASS",
         }
         failures.extend(table_failures)
@@ -207,8 +211,8 @@ def validate_extraction(
             if not batch_id:
                 if table == "expenses":
                     message = f"{table}[{index}]: farm-level expense has no batch_id"
-                    warnings.append(message)
-                    result["warnings"].append(message)
+                    information.append(message)
+                    result["information"].append(message)
                 else:
                     message = f"{table}[{index}]: missing batch_id"
                     failures.append(message)
@@ -259,6 +263,7 @@ def validate_extraction(
         "watermark_update_allowed": handover_decision == "APPROVED",
         "failures": failures,
         "warnings": warnings,
+        "information": information,
         "tables": table_results,
         "window_start": window_start,
         "window_end": window_end,

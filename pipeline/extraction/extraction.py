@@ -28,6 +28,13 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+try:
+    from .handover import HandoverInputError, decide_handover
+    from .validation import ValidationInputError, validate_extraction
+except ImportError:  # Support running this file directly from pipeline/extraction.
+    from handover import HandoverInputError, decide_handover
+    from validation import ValidationInputError, validate_extraction
+
 TABLES = {
     "pig_batches": [
         "id",
@@ -74,6 +81,7 @@ TABLES = {
 }
 
 DEFAULT_OUTPUT_DIR = Path("data")
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_PAGE_SIZE = 1000
 DEFAULT_TIMEOUT_SECONDS = 30
 LOG_FILE_NAME = "extraction.log"
@@ -170,8 +178,9 @@ class MarkdownRunLog:
         validation = metadata["validation"]
         findings = [["FAIL", failure] for failure in validation["failures"]] if validation else []
         findings += [["WARNING", warning] for warning in validation["warnings"]] if validation else []
+        findings += [["INFO", note] for note in validation.get("information", [])] if validation else []
         if not findings and not metadata["error_message"]:
-            findings = [["PASS", "No validation failures or warnings"]]
+            findings = [["PASS", "No validation findings"]]
         elif not findings:
             findings = [
                 ["FAIL", f"Extraction stopped before validation completed: {metadata['error_message']}"]
@@ -255,10 +264,12 @@ def require_environment() -> tuple[str, str]:
 
 def load_dotenv_file() -> None:
     """Load a local .env file without overwriting existing environment values."""
+    script_path = Path(__file__).resolve()
     candidates = [
         Path.cwd() / ".env",
-        Path(__file__).resolve().parent.parent / ".env",
-        Path(__file__).resolve().parent / ".env",
+        PROJECT_ROOT / ".env",
+        script_path.parent.parent / ".env",
+        script_path.parent / ".env",
     ]
     env_path = next((candidate for candidate in candidates if candidate.is_file()), None)
     if env_path is None:
@@ -368,69 +379,9 @@ def extract_table(
     return records
 
 
-def validate_records(records_by_table: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
-    results: dict[str, Any] = {}
-    failures: list[str] = []
-    batch_ids = {row.get("id") for row in records_by_table["pig_batches"] if row.get("id")}
-
-    for table, records in records_by_table.items():
-        required = set(TABLES[table])
-        missing_columns = sorted(required - set().union(*(row.keys() for row in records))) if records else []
-        ids = [row.get("id") for row in records]
-        duplicate_ids = sorted({record_id for record_id in ids if ids.count(record_id) > 1 and record_id})
-        missing_ids = sum(1 for record_id in ids if not record_id)
-        invalid_batch_ids = 0
-        null_batch_ids = 0
-        if table != "pig_batches":
-            null_batch_ids = sum(1 for row in records if not row.get("batch_id"))
-            invalid_batch_ids = sum(
-                1
-                for row in records
-                if (not row.get("batch_id") and table != "expenses")
-                or (row.get("batch_id") and row.get("batch_id") not in batch_ids)
-            )
-
-        table_result = {
-            "required_columns_present": not missing_columns,
-            "missing_columns": missing_columns,
-            "ids_present": missing_ids == 0,
-            "duplicate_ids": duplicate_ids,
-            "batch_relationships_valid": invalid_batch_ids == 0,
-            "invalid_batch_relationships": invalid_batch_ids,
-            "null_batch_ids": null_batch_ids,
-            "null_batch_id_policy": "allowed for farm-level expenses" if table == "expenses" else "not applicable",
-            "records": len(records),
-        }
-        results[table] = table_result
-        if missing_columns:
-            failures.append(f"{table}: missing columns {', '.join(missing_columns)}")
-        if missing_ids:
-            failures.append(f"{table}: {missing_ids} record(s) missing id")
-        if duplicate_ids:
-            failures.append(f"{table}: duplicate id values detected")
-        if invalid_batch_ids:
-            failures.append(f"{table}: invalid batch_id relationship(s)")
-
-    batch_codes = [row.get("batch_code") for row in records_by_table["pig_batches"]]
-    duplicate_codes = sorted({code for code in batch_codes if code and batch_codes.count(code) > 1})
-    results["batch_code_uniqueness"] = {
-        "passed": not duplicate_codes,
-        "duplicates": duplicate_codes,
-    }
-    if duplicate_codes:
-        failures.append("pig_batches: duplicate batch_code values detected")
-
-    warnings = [
-        f"expenses: {results['expenses']['null_batch_ids']} farm-level record(s) have no batch_id"
-    ] if results["expenses"]["null_batch_ids"] else []
-
-    return {
-        "status": "FAIL" if failures else "WARNING" if warnings else "PASS",
-        "passed": not failures,
-        "failures": failures,
-        "warnings": warnings,
-        "tables": results,
-    }
+def validate_records(records_by_table: dict[str, list[dict[str, Any]]], **kwargs: Any) -> dict[str, Any]:
+    """Compatibility wrapper around the standalone extraction validator."""
+    return validate_extraction(records_by_table, **kwargs)
 
 
 def write_csv(path: Path, records: list[dict[str, Any]], expected_columns: list[str]) -> None:
@@ -474,6 +425,62 @@ def record_failure(
     logger.error("Extraction failed: %s", message)
     run_log.write_run(metadata, mode, None)
     write_audit_record(output_dir, metadata)
+
+
+def count_csv_rows(path: Path) -> int:
+    """Count the records actually written in a CSV handover file."""
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        if not reader.fieldnames:
+            raise ExtractionError(f"CSV output has no header: {path}")
+        return sum(1 for _ in reader)
+
+
+def record_count_payload(
+    api_counts: dict[str, int],
+    extracted_counts: dict[str, int],
+    csv_counts: dict[str, int] | None = None,
+) -> dict[str, dict[str, int]]:
+    result: dict[str, dict[str, int]] = {}
+    for table in TABLES:
+        item = {
+            "api_records": api_counts[table],
+            "extracted_records": extracted_counts[table],
+        }
+        if csv_counts is not None:
+            item["csv_rows"] = csv_counts[table]
+        result[table] = item
+    return result
+
+
+def update_table_validation(metadata: dict[str, Any], validation: dict[str, Any]) -> None:
+    for table_log in metadata["tables"]:
+        result = validation.get("tables", {}).get(table_log["table_name"], {})
+        table_log["validation_result"] = result.get("validation_result", "FAIL")
+        if result.get("csv_rows_written") is not None:
+            table_log["csv_rows_written"] = result["csv_rows_written"]
+
+
+def apply_handover(
+    metadata: dict[str, Any],
+    validation: dict[str, Any],
+    output_files: dict[str, str],
+    record_counts: dict[str, dict[str, int]],
+) -> dict[str, Any]:
+    try:
+        decision = decide_handover(
+            pipeline_run_id=str(metadata["pipeline_run_id"]),
+            validation=validation,
+            output_files=output_files,
+            record_counts=record_counts,
+            extraction_status=validation.get("extraction_status"),
+            error_message=metadata.get("error_message") or None,
+        )
+    except HandoverInputError as exc:
+        raise ExtractionError(f"Could not decide extraction handover: {exc}") from exc
+    metadata["validation"] = validation
+    metadata.update(decision)
+    return decision
 
 
 def run(args: argparse.Namespace) -> int:
@@ -560,51 +567,74 @@ def run(args: argparse.Namespace) -> int:
                 table_log["extraction_duration_seconds"],
             )
 
-        validation = validate_records(table_results)
+        api_counts = {table: len(table_results[table]) for table in TABLES}
+        validation_args = {
+            "window_start": metadata["window_start"],
+            "window_end": metadata["window_end"],
+            "api_counts": api_counts,
+            "extracted_counts": api_counts,
+            "declared_columns": {table: list(columns) for table, columns in TABLES.items()},
+        }
+        validation = validate_records(table_results, **validation_args)
         metadata["validation"] = validation
-        metadata["validation_result"] = validation["status"]
-        metadata["extraction_status"] = (
-            "FAILED" if validation["failures"]
-            else "WARNING" if validation["warnings"]
-            else "SUCCESS"
-        )
-        metadata["handover_decision"] = (
-            "REJECTED" if validation["failures"]
-            else "MANUAL REVIEW" if validation["warnings"]
-            else "APPROVED"
-        )
-        for failure in validation["failures"]:
-            logger.error("Validation failure: %s", failure)
+        metadata["validation_result"] = validation["validation_result"]
+        metadata["extraction_status"] = validation["extraction_status"]
+        update_table_validation(metadata, validation)
+
+        if validation["validation_result"] == "FAIL":
+            decision = apply_handover(
+                metadata,
+                validation,
+                {},
+                record_count_payload(api_counts, api_counts),
+            )
+            for failure in decision["failures"]:
+                logger.error("Validation/handover failure: %s", failure)
+            raise ExtractionError("Handover rejected: " + "; ".join(decision["failures"]))
+
+        logger.info("Validation completed | result=%s", validation["validation_result"])
         for warning in validation["warnings"]:
             logger.warning("Validation warning: %s", warning)
-        logger.info("Validation completed | result=%s", validation["status"])
-        for table_log in metadata["tables"]:
-            table_log["validation_result"] = (
-                "PASS" if validation["tables"].get(table_log["table_name"], {}).get("required_columns_present", False)
-                and validation["tables"].get(table_log["table_name"], {}).get("ids_present", False)
-                and not validation["tables"].get(table_log["table_name"], {}).get("duplicate_ids")
-                and validation["tables"].get(table_log["table_name"], {}).get("batch_relationships_valid", True)
-                else "FAIL"
-            )
-            if (
-                table_log["validation_result"] == "PASS"
-                and validation["tables"].get(table_log["table_name"], {}).get("null_batch_ids", 0)
-            ):
-                table_log["validation_result"] = "WARNING"
-            logger.info(
-                "Table %s validation_result=%s",
-                table_log["table_name"],
-                table_log["validation_result"],
-            )
-        if not validation["passed"]:
-            raise ExtractionError("Validation failed: " + "; ".join(validation["failures"]))
+        for note in validation.get("information", []):
+            logger.info("Validation information: %s", note)
 
         run_raw_dir = output_dir / "raw" / run_id
+        output_files: dict[str, str] = {}
         for table, records in table_results.items():
-            write_csv(run_raw_dir / f"{table}.csv", records, TABLES[table])
-            logger.info(
-                "Wrote %d row(s) to %s", len(records), run_raw_dir / f"{table}.csv"
-            )
+            csv_path = run_raw_dir / f"{table}.csv"
+            write_csv(csv_path, records, TABLES[table])
+            output_files[table] = str(csv_path.resolve())
+            logger.info("Wrote %d row(s) to %s", len(records), csv_path)
+
+        csv_counts = {
+            table: count_csv_rows(run_raw_dir / f"{table}.csv")
+            for table in TABLES
+        }
+        validation = validate_records(
+            table_results,
+            **validation_args,
+            csv_counts=csv_counts,
+        )
+        metadata["validation"] = validation
+        metadata["validation_result"] = validation["validation_result"]
+        metadata["extraction_status"] = validation["extraction_status"]
+        update_table_validation(metadata, validation)
+        decision = apply_handover(
+            metadata,
+            validation,
+            output_files,
+            record_count_payload(api_counts, api_counts, csv_counts),
+        )
+        for failure in decision["failures"]:
+            logger.error("Handover failure: %s", failure)
+        for warning in decision["warnings"]:
+            logger.warning("Handover warning: %s", warning)
+        logger.info(
+            "Handover completed | decision=%s",
+            decision["handover_decision"],
+        )
+        if decision["handover_decision"] == "REJECTED":
+            raise ExtractionError("Handover rejected: " + "; ".join(decision["failures"]))
 
         metadata["extraction_end"] = iso_timestamp(utc_now())
         metadata["extraction_duration_seconds"] = round(
