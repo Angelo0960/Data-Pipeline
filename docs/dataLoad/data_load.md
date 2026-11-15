@@ -446,3 +446,120 @@ The batch may proceed only when all critical pre-load checks pass. A failed batc
 
 ------------------------------------------------------------------------
 
+## 5. Post-Load Validation and Reconciliation
+
+Post-load validation is performed after the transformed records have
+been written to PostgreSQL. It confirms that the target data matches the
+approved transformed input and that the load did not lose, duplicate, or
+incorrectly relate records.
+
+This stage verifies the loaded data only. It does not perform new data
+cleaning, recalculate business values, or repeat transformation logic.
+Any issue found must be recorded and handled under the load acceptance
+and rollback rules in Section 8 of the Lab 5 documentation.
+
+### 5.1 Post-Load Validation Checklist
+
+  --------------------------------------------------------------------------------------------------------------------------------------------------------------------
+  Check Name          Target                            Purpose           Validation Criteria                                                           Severity
+  ------------------- --------------------------------- ----------------- ----------------------------------------------------------------------------- --------------
+  Record              All seven target tables and the   Detect missing or For each file/table:                                                          Critical
+  Reconciliation      approved handover                 unaccounted-for   `records_received = records_inserted + records_updated + records_rejected`;   
+                                                        records           rejected means records the load did not write                                 
+
+  Batch Row Count     Each target table and its         Confirm that the  The number of records written for the batch or summary run matches the        Critical
+                      batch/run scope                   expected records  expected count in the approved handover, accounting for inserts, updates, and 
+                                                        were loaded       rejects                                                                       
+
+  Primary-Key         `id` in `pig_batches`,            Prevent duplicate No duplicate primary-key values exist; each source UUID identifies one target Critical
+  Uniqueness          `feed_records`,                   detail records    record                                                                        
+                      `vaccination_records`, and                                                                                                        
+                      `expenses`                                                                                                                        
+
+  Summary-Key         `feed_summary`,                   Prevent duplicate No duplicate summary key exists for the defined grouping fields, reporting    Critical
+  Uniqueness          `expense_summary`, and            aggregate rows    window, and `run_id`                                                          
+                      `expense_type_summary`                                                                                                            
+
+  Referential         `feed_records.batch_id`,          Prevent orphan    Every non-null child `batch_id` matches a parent `pig_batches.id`; permitted  Critical
+  Integrity           `vaccination_records.batch_id`,   child records     null farm-level expense batch IDs remain null                                 
+                      and non-null `expenses.batch_id`                                                                                                  
+                      against `pig_batches.id`                                                                                                          
+
+  Required-Field      Required columns in all seven     Confirm that      No required `NOT NULL` column contains a null value; nullable fields remain   Critical
+  Check               target tables                     required values   subject to the target schema rules                                            
+                                                        were not lost                                                                                   
+                                                        during loading                                                                                  
+
+  Detail-to-Summary   `feed_summary`,                   Confirm that the  Loaded summary row counts and values match the corresponding approved         Critical
+  Reconciliation      `expense_summary`, and            summary outputs   transformed summary files for the same reporting window and run               
+                      `expense_type_summary`            were loaded                                                                                     
+                                                        accurately                                                                                      
+
+  Load Error Review   Load execution logs and     Identify failed   Every failed or rejected record is counted and has a recorded reason; no      Critical
+rejected-record output writes,           unresolved critical database error remains                                  constraint                                                                                      
+ violations, or                                                                interruptions                                                                                   
+  --------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+### 5.2 Reconciliation Rules
+
+**Record-count reconciliation**
+
+For each target table, use:
+
+`Records Received = Records Inserted + Records Updated + Records Rejected`
+
+-   **Records received** are the rows supplied by the approved
+    transformed file.
+-   **Records inserted** are new rows written to the target.
+-   **Records updated** are existing rows changed through the configured
+    upsert.
+-   **Records rejected** are rows received by the load but not written
+    because of a load or target constraint failure.
+
+Records already removed during the transformation stage are not included
+in `records_rejected`, because they were not handed over to the load
+stage.
+
+**Detail-table checks**
+
+-   Confirm that the loaded UUID values match the source UUIDs in the
+    transformed files.
+-   Confirm that each detail table's target records correspond to the
+    batch being processed.
+-   Confirm that primary keys are unique and required columns satisfy
+    target constraints.
+
+**Summary-table checks**
+
+-   Compare each loaded summary with its corresponding approved summary
+    file.
+-   Preserve the grouping fields, `window_start`, `window_end`, and
+    `run_id` used by the summary design.
+-   Do not combine records from different reporting windows or runs.
+
+### 5.3 Post-Load Decision
+
+  -----------------------------------------------------------------------
+  Result                  Condition               Required Action
+  ----------------------- ----------------------- -----------------------
+  `PASS`                  All critical checks     Report successful
+                          pass and record counts  validation and continue
+                          and summary values      to the acceptance
+                          reconcile               decision
+
+  `WARNING`               A non-critical issue is Record the warning and
+                          found without a         hold publication for
+                          critical data-integrity review
+                          failure                 
+
+  `FAIL`                  A critical count, key,  Record the failure and
+                          relationship,           follow Section 8
+                          required-field,         rollback, rejection,
+                          summary, or database    and recovery rules
+                          check fails             
+  -----------------------------------------------------------------------
+
+All results must be recorded against the pipeline run ID, transformation
+run ID, batch ID, and affected target table.
+
+------------------------------------------------------------------------
