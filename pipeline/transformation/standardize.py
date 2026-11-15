@@ -1,7 +1,7 @@
 """Field validation and standardization for PrepAPig Transformation."""
 from __future__ import annotations
 
-from datetime import date, datetime, time as time_value
+from datetime import date, datetime, time as time_value, timezone
 from decimal import Decimal, InvalidOperation
 import uuid
 from typing import Any
@@ -101,10 +101,18 @@ def _time(value: str, field: str) -> str:
     text = (value or "").strip()
     if not text:
         return ""
+    parsed = None
     try:
         parsed = time_value.fromisoformat(text)
-    except ValueError as exc:
-        raise RowValidationError("C-07", field, f"{field} must be a valid time") from exc
+    except ValueError:
+        for time_format in ("%I:%M:%S %p", "%I:%M %p"):
+            try:
+                parsed = datetime.strptime(text.upper(), time_format).time()
+                break
+            except ValueError:
+                continue
+    if parsed is None:
+        raise RowValidationError("C-07", field, f"{field} must be a valid time")
     precision = "seconds" if parsed.second or parsed.microsecond else "minutes"
     return parsed.isoformat(timespec=precision)
 
@@ -142,9 +150,18 @@ def standardize_record(table: str, source: dict[str, Any]) -> dict[str, str]:
 
 
 def validate_window_timestamp(value: str, field: str) -> datetime | None:
+    """Parse timestamps with the same UTC convention used by extraction validation.
+
+    Source `created_at` values may be timezone-naive. Extraction validation
+    interprets those values as UTC; normalize them here as well for window
+    comparisons while leaving the original CSV representation unchanged.
+    """
     if not value:
         return None
     try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     except ValueError as exc:
         raise ValueError(f"{field} is not a valid ISO timestamp") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
