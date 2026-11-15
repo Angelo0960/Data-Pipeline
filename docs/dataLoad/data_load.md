@@ -731,3 +731,205 @@ Logs must not contain database passwords, API keys, or connection
 secrets. Credentials remain in protected environment variables or the
 approved secrets-management mechanism described in the current Data Load
 design.
+
+## 7. Log Retention, Rejected Data, and Access
+
+This section defines how PrepAPig load logs and rejected records should
+be stored, retained, protected, archived, and deleted. Retention periods
+below are **proposed project policies** because the current Data Load
+file does not specify approved retention durations or a finalized
+production log-storage service. They should be confirmed with the
+project lead and database administrator before deployment.
+
+### 7.1 Log and Rejected-Data Retention
+
+  ------------------------------------------------------------------------------------------
+  Item              Suggested Storage Location           Retention Period  Purpose
+  ----------------- ------------------------------------ ----------------- -----------------
+  Operational load  `pipeline/logs/load/`                At least 90 days  Monitor
+  logs                                                                     executions and
+                                                                           investigate
+                                                                           recent loading
+                                                                           errors
+
+  Rejected records  `pipeline/data/rejected/<run_id>/`   At least 90 days, Preserve records
+                                                         or until the      that failed
+                                                         related issue is  during loading
+                                                         resolved,         and their
+                                                         whichever is      rejection reasons
+                                                         later             
+
+  Batch audit       A dedicated load-history table in    At least 1 year   Maintain
+  history           `prepapig_etl`, if implemented, or                     traceability of
+                    protected audit-log storage                            batch IDs, run
+                                                                           IDs, statuses,
+                                                                           record counts,
+                                                                           and validation
+                                                                           results
+
+  PostgreSQL backup Approved PostgreSQL backup storage   According to the  Provide a
+  or snapshot       or the configured hosting-provider   approved backup   recovery point
+                    backup service                       policy            before major or
+                                                                           high-impact loads
+  ------------------------------------------------------------------------------------------
+
+The suggested paths describe a logical organization. They must be
+adjusted to the actual server or deployment environment. A dedicated
+load-history table is a proposed implementation option, not a claim that
+such a table already exists in the current schema.
+
+### 7.2 Rejected-Record Management
+
+-   Keep rejected records separate from successfully loaded target
+    records.
+-   Record the related `run_id`, `transformation_run_id`, `batch_id`,
+    target table, and rejection reason whenever available.
+-   Do not silently discard rejected records.
+-   Do not automatically reload rejected records without an approved
+    corrected handover.
+-   If the problem is caused by an invalid transformed record or
+    relationship, report it to the responsible earlier pipeline stage
+    for correction.
+-   Retain rejected records for at least the defined period and longer
+    when an investigation or recovery is still open.
+
+### 7.3 Access Permissions
+
+Access to logs, rejected records, audit history, and backups must be
+restricted to authorized personnel.
+
+  ------------------------------------------------------------------------
+  Role / User       Read Permission    Write Permission  Delete Permission
+  ----------------- ------------------ ----------------- -----------------
+  Python loading    Read approved      Write target      No routine
+  process /         handover metadata  records and       permission to
+  database loading  and target         permitted         delete logs,
+  account           information needed execution-log or  audit history, or
+                    for loading and    rejected-record   backups
+                    validation         outputs           
+
+  Authorized        Read load logs,    Maintain loading  May perform
+  project developer rejected records,  code and write    approved cleanup
+                    and validation     technical records only when
+                    results for        where authorized  retention and
+                    troubleshooting                      audit
+                                                         requirements are
+                                                         satisfied
+
+  Database          Read               Manage database   Perform approved
+  administrator     database-related   permissions,      database and
+                    load information   backups, and      backup
+                    and backup records recovery          maintenance
+                                       operations        
+
+  Project lead /    Read load reports, Record review or  Approve
+  authorized        audit history, and approval          retention-based
+  reviewer          validation results decisions where   deletion; does
+                                       the process       not routinely
+                                       supports them     modify historical
+                                                         logs
+
+  Other system      No access unless   No access         No access
+  users             explicitly                           
+                    authorized                           
+  ------------------------------------------------------------------------
+
+The database loading account must have only the permissions required for
+its task. Database credentials and connection secrets must remain in
+environment variables or an approved secret store and must never be
+written into logs or rejected-record files.
+
+### 7.4 Archiving Requirements
+
+1.  Operational logs that are no longer needed for daily monitoring may
+    be moved to protected archive storage after the active retention
+    period, provided no investigation is open.
+2.  Audit history must remain available for at least the proposed
+    one-year retention period.
+3.  Rejected records must remain available until the issue is resolved
+    and the applicable retention period has passed.
+4.  Archived records must preserve their run ID, transformation run ID,
+    batch ID, target table, and reporting window so that they remain
+    traceable.
+5.  Archived files must be protected from unauthorized modification or
+    deletion.
+
+### 7.5 Deletion Rules and Responsible Process
+
+  -----------------------------------------------------------------------
+  Record Type             When It May Be Deleted  Responsible Role /
+                                                  Process
+  ----------------------- ----------------------- -----------------------
+  Operational load logs   After at least 90 days, Authorized maintenance
+                          when no                 process with project
+                          troubleshooting, audit, lead approval
+                          or recovery activity    
+                          requires them           
+
+  Rejected records        After at least 90 days  Authorized developer or
+                          and only after the      administrator, with
+                          related issue has been  project lead approval
+                          resolved and documented 
+
+  Batch audit history     Only after the proposed Project lead and
+                          one-year minimum and    database administrator
+                          confirmation that no    
+                          audit or recovery       
+                          requirement remains     
+
+  Database backups        According to the        Database administrator
+                          approved backup         
+                          schedule and only when  
+                          the backup is no longer 
+                          required for recovery   
+  -----------------------------------------------------------------------
+
+No log or rejected record may be deleted before its retention period
+ends or while it is needed for troubleshooting, auditing, or recovery.
+Deletion must follow the approved process and should be recorded when
+audit logging is available.
+
+### 7.6 Backup or Snapshot Before Major Loads
+
+The current Data Load design uses PostgreSQL and specifies transaction
+rollback for failed batches. A database backup or snapshot is an
+additional safeguard for major or high-impact loads, where supported by
+the hosting environment.
+
+  -----------------------------------------------------------------------
+  Backup Item                         Requirement
+  ----------------------------------- -----------------------------------
+  Timing                              Take a backup or snapshot before a
+                                      major or high-impact load when
+                                      supported and required by the
+                                      operating policy
+
+  Scope                               The target PostgreSQL database,
+                                      including the `prepapig_etl` schema
+                                      and its data
+
+  Storage                             Approved, access-controlled
+                                      PostgreSQL backup storage or
+                                      hosting-provider backup service
+
+  Access                              Authorized database administrator
+                                      only
+
+  Verification                        Confirm that the backup completed
+                                      and that its recovery procedure is
+                                      available
+
+  Recovery                            Restore only through the approved
+                                      database recovery procedure; verify
+                                      target tables and data consistency
+                                      after restoration
+  -----------------------------------------------------------------------
+
+A backup does not replace the load transaction. The normal response to a
+failed batch is to roll back the uncommitted batch transaction, record
+the failure, correct the cause in the appropriate stage, and rerun using
+the approved transformed handover. A database restore is reserved for a
+broader database recovery situation.
+
+
+------------------------------------------------------------------------
