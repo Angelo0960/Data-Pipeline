@@ -65,11 +65,11 @@ The extraction and transformation stages can be invoked on demand. PostgreSQL lo
 
 ## Extraction run logging
 
-Each run creates a unique `pipeline_run_id`, records `SUCCESS`, `WARNING`, or `FAILED`, and produces table-level metadata, validation results, and a handover decision (`APPROVED`, `MANUAL REVIEW`, or `REJECTED`). Operational logs and audit records follow the storage and retention rules in [`docs/extraction/data_extraction.md`](docs/extraction/data_extraction.md).
+Each run creates a unique `pipeline_run_id`, records `SUCCESS`, `WARNING`, or `FAILED`, and produces table-level metadata, validation results, and a handover decision (`APPROVED`, `MANUAL REVIEW`, or `REJECTED`). Every progress and result log entry is appended to the fixed file `pipeline/data/extraction/extraction.log`, regardless of the current working directory or raw-data output override. Structured run metadata is retained separately under `<data-dir>/extraction/audit/` for scheduler handoff and retry; see [`docs/extraction/data_extraction.md`](docs/extraction/data_extraction.md).
 
 ## Current implementation status
 
 - **Implemented:** extraction handover checks, transformation, farm-level expense summaries, quality reports, run-scoped audit output, and PostgreSQL loading. The load contract and setup steps are in [`docs/loading.md`](docs/loading.md).
 - **Scheduler:** configurable Node.js Cron orchestration is in [`scheduler.js`](scheduler.js); setup, stage order, and retries are documented in [`docs/scheduling.md`](docs/scheduling.md).
-- **Manual load:** `python -m pipeline.load data/transformed/<pipeline_run_id>` loads only a PASS/APPROVED bundle after the migration is applied and `PIPELINE_DATABASE_URL` is set.
+- **Manual load:** `python -m pipeline.load pipeline/data/transformed/<pipeline_run_id>` loads only a PASS/APPROVED bundle after the migration is applied and `PIPELINE_DATABASE_URL` is set.
 - **Start schedule:** `npm run schedule` after setting `PREPAPIG_DAILY_TIME` and `PREPAPIG_TIMEZONE`; run `npm run validate-schedule` first.

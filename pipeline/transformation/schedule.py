@@ -44,7 +44,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input-dir", required=True, type=Path, help="Extraction output folder")
     parser.add_argument("--metadata", required=True, type=Path, help="Extraction audit metadata JSON")
-    parser.add_argument("--output-dir", type=Path, default=Path("data"))
+    parser.add_argument("--output-dir", type=Path, default=Path(__file__).resolve().parents[2] / "pipeline" / "data")
     parser.add_argument("--validate-config-only", action="store_true", help="Validate approved schedule settings without starting stages")
     args = parser.parse_args()
     try:

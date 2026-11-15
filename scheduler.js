@@ -25,7 +25,7 @@ function safeError(value) {
 }
 
 function runtimeConfig() {
-  const dataDir = path.resolve(PROJECT_ROOT, process.env.PIPELINE_DATA_DIR || "data");
+  const dataDir = path.resolve(PROJECT_ROOT, process.env.PIPELINE_DATA_DIR || path.join("pipeline", "data"));
   const python = (process.env.PIPELINE_PYTHON || "python").trim();
   if (!python) throw new Error("PIPELINE_PYTHON must name the Python executable.");
   const schedulerLog = path.resolve(
@@ -75,7 +75,7 @@ async function readJson(file) {
 }
 
 async function findExtractionAudit(dataDir, startedAtMs) {
-  const directory = path.join(dataDir, "logs", "extraction", "audit");
+  const directory = path.join(dataDir, "extraction", "audit");
   let names;
   try { names = await readdir(directory); }
   catch { return null; }
@@ -118,7 +118,7 @@ async function runDownstream(settings, extraction, record) {
   }
   record.stage_results.handover = "SUCCESS";
   const inputDir = path.join(settings.dataDir, "raw", pipelineRunId);
-  const metadataPath = path.join(settings.dataDir, "logs", "extraction", "audit", `${pipelineRunId}.json`);
+  const metadataPath = path.join(settings.dataDir, "extraction", "audit", `${pipelineRunId}.json`);
   record.stage_results.transformation = "RUNNING";
   await runCommand(settings.python, ["-m", "pipeline.transformation.orchestrate", "--input-dir", inputDir, "--metadata", metadataPath, "--output-dir", settings.dataDir], "transformation");
   const bundle = path.join(settings.dataDir, "transformed", pipelineRunId);
@@ -156,7 +156,7 @@ async function executeRun(mode, retryRunId = null) {
     let extraction;
     if (mode === "retry") {
       if (!RUN_ID_PATTERN.test(retryRunId || "") || retryRunId.includes("..")) throw new StageError("retry_input", "Retry requires a safe extraction pipeline_run_id.");
-      const metadataPath = path.join(settings.dataDir, "logs", "extraction", "audit", `${retryRunId}.json`);
+      const metadataPath = path.join(settings.dataDir, "extraction", "audit", `${retryRunId}.json`);
       try { extraction = await readJson(metadataPath); }
       catch (error) { throw new StageError("retry_input", `Cannot read the original extraction audit: ${safeError(error.message)}`, { pipelineRunId: retryRunId }); }
       if (extraction.pipeline_run_id !== retryRunId || extraction.extraction_status !== "SUCCESS" || extraction.handover_decision !== "APPROVED" || extraction.validation_result !== "PASS") {

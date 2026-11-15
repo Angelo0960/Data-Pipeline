@@ -6,7 +6,7 @@ The Node.js scheduler has no hard-coded run time and does not start as a backgro
 
 - `PREPAPIG_DAILY_TIME`: required 24-hour `HH:MM` local clock time.
 - `PREPAPIG_TIMEZONE`: required IANA timezone (for example `Asia/Manila`).
-- `PIPELINE_DATA_DIR`: optional pipeline data root; defaults to `data` in the repository.
+- `PIPELINE_DATA_DIR`: optional pipeline data root; defaults to `pipeline/data` inside the repository. Extraction log lines always append to the fixed repository file `pipeline/data/extraction/extraction.log`; JSON run metadata is stored under `<data-dir>/extraction/audit/` for scheduler handoff and retry.
 - `PIPELINE_PYTHON`: optional Python executable; defaults to `python`.
 - `PIPELINE_DATABASE_URL`: required by the final Load stage; use only a separate PostgreSQL destination and never commit or print the connection string.
 - `PREPAPIG_SCHEDULER_LOG`: optional JSONL audit path; defaults to `<data-dir>/logs/scheduler/runs.jsonl`.

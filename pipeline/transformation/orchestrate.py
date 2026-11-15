@@ -112,7 +112,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input-dir", required=True, type=Path, help="Extraction output folder")
     parser.add_argument("--metadata", required=True, type=Path, help="Extraction audit metadata JSON")
-    parser.add_argument("--output-dir", type=Path, default=Path("data"))
+    parser.add_argument("--output-dir", type=Path, default=Path(__file__).resolve().parents[2] / "pipeline" / "data")
     parser.add_argument("--load", action="store_true", help="Load the approved output bundle into the configured PostgreSQL destination")
     args = parser.parse_args()
     try:

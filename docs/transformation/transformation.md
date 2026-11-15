@@ -8,7 +8,7 @@ This document describes the transformation process for the PrepAPig Batch Data P
 
 ## Repository implementation status
 
-The current code implements an on-demand handover-to-transformation flow. It accepts only an approved handover, reads the supplied CSV files without re-querying the source, writes run-scoped outputs under `data/transformed/<pipeline_run_id>/` by default, and records quality and audit information. A NULL `expenses.batch_id` is retained as farm-level data and reported separately in `farm_expense_summary.csv`.
+The current code implements an on-demand handover-to-transformation flow. It accepts only an approved handover, reads the supplied CSV files without re-querying the source, writes run-scoped outputs under `pipeline/data/transformed/<pipeline_run_id>/` by default, and records quality and audit information. A NULL `expenses.batch_id` is retained as farm-level data and reported separately in `farm_expense_summary.csv`.
 
 PostgreSQL loading is implemented as an optional destination stage. `pipeline.load` writes only approved run-scoped output into the separate `prepapig_etl` schema, requires `PIPELINE_DATABASE_URL`, and requires the migration to be applied explicitly. The optional Node.js Cron scheduler in `scheduler.js` runs Extraction → Transformation → Load when explicitly started with `PREPAPIG_DAILY_TIME` and `PREPAPIG_TIMEZONE`. See [`docs/loading.md`](../loading.md) and [`docs/scheduling.md`](../scheduling.md) for their contracts; neither is part of the BAT 405 midterm scope.
 
@@ -27,7 +27,8 @@ Stage 2 receives the validated output from Extraction Stage. It must use the han
 | Input handover | Approved Extraction Stage extracted dataset, extraction metadata, and validation results |
 | Input format | CSV files |
 | Input files | `pig_batches.csv`, `feed_records.csv`, `vaccination_records.csv`, and `expenses.csv` |
-| Extraction log | `extraction_log.csv` |
+| Extraction log | `pipeline/data/extraction/extraction.log` |
+| Extraction audit metadata | `pipeline/data/extraction/audit/<pipeline_run_id>.json` |
 | Metadata received | Pipeline run ID, table name, extraction timestamps, extraction status, record counts, extraction window, validation result, error message, and extraction duration, where recorded |
 | Expected handover status | `APPROVED`; only approved extraction output proceeds automatically |
 | Extraction run ID | Read from the Extraction Stage metadata field `pipeline_run_id`; an example format is `PREPAPIG_20261004_230000` |
@@ -296,35 +297,11 @@ Stage 2 must produce a transformation log for each run. The log links the input 
 7. Keep the Extraction Stage extraction metadata unchanged and link it to the Stage 2 log using `pipeline_run_id`.
 8. Never write passwords, API keys, access tokens, or database connection secrets to transformation logs.
 
-### 8.3 Suggested Output Naming
+### 8.3 Repository Output Paths
 
-The exact deployed output directory is not specified in the reference documents. A suggested organization is:
+The repository uses `pipeline/data/` as the default data root. Every extraction progress and result log entry is appended to the fixed `pipeline/data/extraction/extraction.log`; machine-readable extraction metadata is stored under `<data-dir>/extraction/audit/`. Raw and transformed run outputs are kept under `<data-dir>/raw/<pipeline_run_id>/` and `<data-dir>/transformed/<pipeline_run_id>/` respectively. `PIPELINE_DATA_DIR` or `--output-dir` can override the data root without moving the extraction log.
 
-```text
-PrepAPig-ETL/
-├── input/
-│   └── extracted_data/
-│       ├── pig_batches.csv
-│       ├── feed_records.csv
-│       ├── vaccination_records.csv
-│       ├── expenses.csv
-│       └── extraction_log.csv
-├── output/
-│   └── transformed_data/
-│       ├── pig_batches_transformed.csv
-│       ├── feed_records_transformed.csv
-│       ├── vaccination_records_transformed.csv
-│       ├── expenses_transformed.csv
-│       ├── feed_summary.csv
-│       ├── expense_summary.csv
-│       └── farm_expense_summary.csv
-└── logs/
-    └── transformation/
-        ├── transformation_log.csv
-        └── data_quality_report.csv
-```
-
-These names are proposed conventions and should be aligned with the actual Python ETL project configuration.
+These paths describe the current repository defaults.
 
 ---
 

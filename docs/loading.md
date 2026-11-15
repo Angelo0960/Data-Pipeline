@@ -17,7 +17,7 @@ The migration is also available at `migrations/001_pipeline_load.sql`. It is ide
 Load a transformed bundle by its run folder:
 
 ```sh
-python -m pipeline.load data/transformed/<pipeline_run_id>
+python -m pipeline.load pipeline/data/transformed/<pipeline_run_id>
 ```
 
 The loader rejects a bundle unless its transformation metadata and `transformation_log.csv` agree on the extraction and transformation run IDs, report `PASS`/`APPROVED`, report zero quarantined rows, and all seven detail/summary CSV outputs are present and consistent. It rechecks identifiers, parent-batch references, numeric/date fields, run IDs, and summary-to-detail reconciliation before opening a database transaction.

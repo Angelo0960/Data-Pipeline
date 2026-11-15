@@ -80,8 +80,8 @@ TABLES = {
     ],
 }
 
-DEFAULT_OUTPUT_DIR = Path("data")
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "pipeline" / "data"
 DEFAULT_PAGE_SIZE = 1000
 DEFAULT_TIMEOUT_SECONDS = 30
 LOG_FILE_NAME = "extraction.log"
@@ -200,24 +200,37 @@ class MarkdownRunLog:
 
 
 def configure_logging(output_dir: Path, run_id: str, quiet: bool = False) -> Path:
-    """Stream run progress lines to the console and return the single log file path."""
+    """Stream every run log line to one append-only extraction log."""
     logger.setLevel(logging.INFO)
     logger.propagate = False
-    if not logger.handlers and not quiet:
-        formatter = logging.Formatter(LOG_FORMAT, datefmt=LOG_DATE_FORMAT)
-        formatter.converter = time.gmtime
+    log_path = PROJECT_ROOT / "pipeline" / "data" / "extraction" / LOG_FILE_NAME
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    if not log_path.exists():
+        log_path.write_text(f"{LOG_TITLE}\n\n", encoding="utf-8")
+
+    for handler in list(logger.handlers):
+        logger.removeHandler(handler)
+        handler.close()
+    logger.run_id = run_id
+    formatter = logging.Formatter(LOG_FORMAT, datefmt=LOG_DATE_FORMAT)
+    formatter.converter = time.gmtime
+
+    file_handler = logging.FileHandler(log_path, encoding="utf-8")
+    file_handler.setFormatter(formatter)
+    file_handler.addFilter(RunIdFilter())
+    logger.addHandler(file_handler)
+    if not quiet:
         console_handler = logging.StreamHandler(sys.stdout)
         console_handler.setFormatter(formatter)
         console_handler.addFilter(RunIdFilter())
         logger.addHandler(console_handler)
-    logger.run_id = run_id
-    return output_dir / "logs" / "extraction" / "operational" / LOG_FILE_NAME
+    return log_path
 
 
 def write_audit_record(output_dir: Path, metadata: dict[str, Any]) -> None:
-    """Persist the complete run metadata in restricted audit storage."""
+    """Persist machine-readable run metadata beside the extraction log."""
     write_json(
-        output_dir / "logs" / "extraction" / "audit" / f"{metadata['pipeline_run_id']}.json",
+        output_dir / "extraction" / "audit" / f"{metadata['pipeline_run_id']}.json",
         metadata,
     )
 
