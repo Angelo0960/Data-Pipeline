@@ -117,24 +117,110 @@ def write_outputs(
     write_csv(folder / "farm_expense_summary.csv", farm_expense_summary,
               ["expense_type", "record_count", "total_expense", "pipeline_run_id", "window_start", "window_end"])
     write_csv(folder / "quarantine.csv", quarantine,
-              ["pipeline_run_id", "table_name", "source_row", "source_id", "rule_id", "field", "reason", "record_json"])
+              ["pipeline_run_id", "table_name", "source_row", "source_id", "batch_id", "rule_id", "field", "reason", "record_json"])
     quality_rows: list[dict[str, str]] = []
+    rule_guidance = {
+        "C-01": ("Quarantine; correct the source ID without generating a replacement.", "critical"),
+        "C-02": ("Quarantine every conflicting copy; require manual source review.", "critical"),
+        "C-03": ("Quarantine all batch-code collisions; confirm the authoritative source values.", "high"),
+        "C-04": ("Quarantine missing required values; preserve permitted optional NULLs.", "high"),
+        "C-05": ("Quarantine invalid numeric values; correct at source and do not silently round.", "high"),
+        "C-07": ("Quarantine invalid required dates/times; do not infer ambiguous values.", "high"),
+        "R-01": ("Quarantine missing/orphan required relationships; preserve valid farm-level NULL expenses.", "critical"),
+    }
     for table, values in profiles.items():
-        for metric, count in values.items():
-            if isinstance(count, list):
-                quality_rows.append({
-                    "table_name": table,
-                    "metric": f"profile:{metric}",
-                    "count": str(len(count)),
-                    "details": json.dumps(count, ensure_ascii=False),
-                })
+        denominator = int(values.get("rows_read", 0))
+        for metric, value in values.items():
+            if isinstance(value, dict):
+                is_duplicate_ids = metric == "duplicate_id_counts"
+                field = "id" if is_duplicate_ids else metric.partition(":")[2]
+                for observed_value, observed_count in value.items():
+                    quality_rows.append({
+                        "table_name": table, "column": field,
+                        "issue_type": "duplicate_primary_key" if is_duplicate_ids else "observed_category",
+                        "rule_id": "C-02" if is_duplicate_ids else "C-09",
+                        "metric": "duplicate_primary_key" if is_duplicate_ids else "observed_category",
+                        "count": str(observed_count),
+                        "details": f"{field}={observed_value}",
+                        "sample_values": json.dumps([observed_value], ensure_ascii=False),
+                        "affected_percent": f"{(100.0 * int(observed_count) / denominator) if denominator else 0.0:.2f}",
+                        "planned_treatment": (
+                            "Retain one exact copy; quarantine all rows if values conflict for this ID."
+                            if is_duplicate_ids else
+                            "Compare with an approved vocabulary; do not guess, normalize, or discard categories."
+                        ),
+                        "severity": "critical" if is_duplicate_ids else "review",
+                    })
+                continue
+            if isinstance(value, list):
+                if metric.startswith("whitespace_samples:"):
+                    continue
+                count = len(value)
+                details = json.dumps(value, ensure_ascii=False)
+                samples = details
+                treatment = "Compare observed values with an approved vocabulary; no category is guessed or remapped."
+                severity = "review"
+                percent_text = ""
             else:
-                quality_rows.append({"table_name": table, "metric": f"profile:{metric}", "count": str(count), "details": ""})
+                count = int(value)
+                details = ""
+                is_blank_metric = metric.startswith("blank_values:")
+                is_whitespace_metric = metric.startswith("whitespace_values:")
+                column = metric.partition(":")[2] if is_blank_metric or is_whitespace_metric else ""
+                samples = json.dumps([""]) if is_blank_metric and count else "[]"
+                if is_whitespace_metric:
+                    samples = json.dumps(values.get(f"whitespace_samples:{column}", []), ensure_ascii=False)
+                treatment = (
+                    "Trim leading/trailing text whitespace and preserve meaningful internal text."
+                    if is_whitespace_metric else
+                    "Retain optional NULLs; required blanks are quarantined under the applicable cleaning rule."
+                    if is_blank_metric else ""
+                )
+                severity = "review" if count else "info"
+                percent_text = f"{(100.0 * count / denominator) if denominator else 0.0:.2f}" if is_blank_metric or is_whitespace_metric or metric in {"duplicate_id_rows", "exact_duplicate_rows"} else ""
+            quality_rows.append({
+                "table_name": table,
+                "column": column if not isinstance(value, (list, dict)) else "",
+                "issue_type": "whitespace" if metric.startswith("whitespace_values:") else "blank_values" if metric.startswith("blank_values:") else metric,
+                "rule_id": "C-06" if metric.startswith("whitespace_values:") else "",
+                "metric": f"profile:{metric}", "count": str(count),
+                "details": details, "sample_values": samples,
+                "affected_percent": percent_text, "planned_treatment": treatment, "severity": severity,
+            })
+    issue_groups: dict[tuple[str, str, str], list[dict[str, str]]] = {}
+    for item in quarantine:
+        key = (item.get("table_name", ""), item.get("rule_id", ""), item.get("field", ""))
+        issue_groups.setdefault(key, []).append(item)
+    for (table, rule_id, field), items in issue_groups.items():
+        samples: list[str] = []
+        for item in items:
+            try:
+                record = json.loads(item.get("record_json", "{}"))
+            except json.JSONDecodeError:
+                record = {}
+            sample = str(record.get(field, ""))
+            if sample not in samples:
+                samples.append(sample)
+            if len(samples) == 5:
+                break
+        denominator = int(profiles.get(table, {}).get("rows_read", 0))
+        treatment, severity = rule_guidance.get(rule_id, ("Review the row-level quarantine reason and correct the source data.", "review"))
+        quality_rows.append({
+            "table_name": table, "column": field, "issue_type": "quarantined_rows", "rule_id": rule_id,
+            "metric": "profiled_issue", "count": str(len(items)),
+            "details": f"{rule_id}:{field}", "sample_values": json.dumps(samples, ensure_ascii=False),
+            "affected_percent": f"{(100.0 * len(items) / denominator) if denominator else 0.0:.2f}",
+            "planned_treatment": treatment, "severity": severity,
+        })
     for table, values in rule_counts.items():
         for rule, count in values.items():
-            quality_rows.append({"table_name": table, "metric": "rule_count", "count": str(count), "details": rule})
+            quality_rows.append({
+                "table_name": table, "column": "", "issue_type": "rule_count", "rule_id": rule,
+                "metric": "rule_count", "count": str(count), "details": rule,
+                "sample_values": "[]", "affected_percent": "", "planned_treatment": "", "severity": "info",
+            })
     write_csv(folder / "data_quality_report.csv", quality_rows,
-              ["table_name", "metric", "count", "details"])
+              ["table_name", "column", "issue_type", "rule_id", "metric", "count", "details", "sample_values", "affected_percent", "planned_treatment", "severity"])
     write_json(folder / "transformation_metadata.json", metadata)
 
 

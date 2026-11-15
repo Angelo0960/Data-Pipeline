@@ -9,15 +9,15 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from .standardize import SOURCE_COLUMNS, RowValidationError, standardize_record, validate_window_timestamp
+    from .standardize import SOURCE_COLUMNS, TEXT_FIELDS, RowValidationError, standardize_record, validate_window_timestamp
 except ImportError:
-    from pipeline.transformation.standardize import SOURCE_COLUMNS, RowValidationError, standardize_record, validate_window_timestamp
+    from pipeline.transformation.standardize import SOURCE_COLUMNS, TEXT_FIELDS, RowValidationError, standardize_record, validate_window_timestamp
 
 TABLES = tuple(SOURCE_COLUMNS)
 
 
 class BatchCleaningError(ValueError):
-    """A dataset-level conflict that cannot be safely resolved row by row."""
+    """A dataset-level input or contract failure that prevents safe profiling."""
 
 
 def load_source_files(input_dir: Path, metadata: dict[str, Any]) -> tuple[dict[str, list[dict[str, str]]], dict[str, list[str]]]:
@@ -61,19 +61,29 @@ def profile_table(rows: list[dict[str, str]], headers: list[str]) -> dict[str, A
     profile: dict[str, Any] = {"rows_read": len(rows), "columns_read": len(headers)}
     for field in headers:
         profile[f"blank_values:{field}"] = sum(1 for row in rows if not (row.get(field) or "").strip())
+        whitespace_samples = sorted({
+            str(row.get(field) or "") for row in rows
+            if str(row.get(field) or "") != str(row.get(field) or "").strip()
+        })[:5]
+        profile[f"whitespace_values:{field}"] = sum(
+            1 for row in rows
+            if str(row.get(field) or "") != str(row.get(field) or "").strip()
+        )
+        profile[f"whitespace_samples:{field}"] = whitespace_samples
         if field in CATEGORY_PROFILE_FIELDS:
-            profile[f"observed_categories:{field}"] = sorted({
-                (row.get(field) or "").strip() for row in rows if (row.get(field) or "").strip()
-            })
+            values = [(row.get(field) or "").strip() for row in rows if (row.get(field) or "").strip()]
+            profile[f"observed_categories:{field}"] = sorted(set(values))
+            profile[f"category_counts:{field}"] = dict(sorted(Counter(values).items()))
     ids = [str(row.get("id", "")).strip() for row in rows if str(row.get("id", "")).strip()]
     id_counts = Counter(ids)
     profile["duplicate_id_rows"] = sum(count - 1 for count in id_counts.values() if count > 1)
+    profile["duplicate_id_counts"] = {key: count for key, count in sorted(id_counts.items()) if count > 1}
     signatures = Counter(tuple(sorted(row.items())) for row in rows)
     profile["exact_duplicate_rows"] = sum(count - 1 for count in signatures.values() if count > 1)
     return profile
 
 
-def validate_extraction_window(rows: list[dict[str, str]], table: str, window_start: Any, window_end: Any) -> None:
+def validate_extraction_window(window_start: Any, window_end: Any) -> None:
     start = validate_window_timestamp(window_start, "window_start") if window_start else None
     end = validate_window_timestamp(window_end, "window_end") if window_end else None
     if start and end:
@@ -81,29 +91,23 @@ def validate_extraction_window(rows: list[dict[str, str]], table: str, window_st
             raise BatchCleaningError("Extraction window mixes aware and naive timestamps")
         if start > end:
             raise BatchCleaningError("window_start cannot be later than window_end")
-    for line, row in enumerate(rows, start=2):
-        try:
-            created = validate_window_timestamp(row.get("created_at", ""), "created_at")
-        except ValueError as exc:
-            raise BatchCleaningError(f"{table} CSV row {line}: {exc}") from exc
-        if created is None:
-            raise BatchCleaningError(f"{table} CSV row {line}: created_at is missing")
-        for bound in (start, end):
-            if bound and (created.utcoffset() is None) != (bound.utcoffset() is None):
-                raise BatchCleaningError(f"{table} CSV row {line}: created_at timezone does not match extraction window")
-        if start and created <= start:
-            raise BatchCleaningError(f"{table} CSV row {line}: created_at is outside the extraction window")
-        if end and created > end:
-            raise BatchCleaningError(f"{table} CSV row {line}: created_at is outside the extraction window")
 
 
-def clean_records(raw_by_table: dict[str, list[dict[str, str]]], headers_by_table: dict[str, list[str]], pipeline_run_id: str = "") -> tuple[dict[str, list[dict[str, str]]], list[dict[str, str]], dict[str, int], dict[str, Counter[str]], dict[str, dict[str, int]]]:
+def clean_records(
+    raw_by_table: dict[str, list[dict[str, str]]],
+    headers_by_table: dict[str, list[str]],
+    pipeline_run_id: str = "",
+    window_start: Any = None,
+    window_end: Any = None,
+) -> tuple[dict[str, list[dict[str, str]]], list[dict[str, str]], dict[str, int], dict[str, Counter[str]], dict[str, dict[str, Any]]]:
     accepted: dict[str, list[dict[str, str]]] = {}
     quarantine: list[dict[str, str]] = []
     duplicate_counts: dict[str, int] = {}
     rule_counts: dict[str, Counter[str]] = {}
     profiles = {table: profile_table(raw_by_table[table], headers_by_table[table]) for table in TABLES}
     parent_ids: set[str] = set()
+    start = validate_window_timestamp(window_start, "window_start") if window_start else None
+    end = validate_window_timestamp(window_end, "window_end") if window_end else None
 
     for table in TABLES:
         rows = raw_by_table[table]
@@ -129,6 +133,16 @@ def clean_records(raw_by_table: dict[str, list[dict[str, str]]], headers_by_tabl
                     conflicting[index] = ("C-02", f"Conflicting rows share source id {normalized_id}; all copies quarantined")
             else:
                 exact_duplicate_indices.update(index for index, _ in entries[1:])
+
+        seen_exact_signatures: set[tuple[tuple[str, str], ...]] = set()
+        for index, source in enumerate(rows):
+            if index in conflicting or index in exact_duplicate_indices:
+                continue
+            signature = tuple(sorted((key, value or "") for key, value in source.items()))
+            if signature in seen_exact_signatures:
+                exact_duplicate_indices.add(index)
+            else:
+                seen_exact_signatures.add(signature)
 
         if table == "pig_batches":
             code_groups: dict[str, list[int]] = {}
@@ -156,6 +170,7 @@ def clean_records(raw_by_table: dict[str, list[dict[str, str]]], headers_by_tabl
                     "table_name": table,
                     "source_row": str(line_number),
                     "source_id": source_id,
+                    "batch_id": str(source.get("batch_id") or (source_id if table == "pig_batches" else "")),
                     "rule_id": rule_id,
                     "field": "id" if rule_id == "C-02" else "batch_code",
                     "reason": reason,
@@ -166,6 +181,15 @@ def clean_records(raw_by_table: dict[str, list[dict[str, str]]], headers_by_tabl
                 continue
             try:
                 clean = standardize_record(table, source)
+                if start or end:
+                    created = validate_window_timestamp(clean.get("created_at", ""), "created_at")
+                    if created is None:
+                        raise RowValidationError("C-07", "created_at", "created_at is missing")
+                    for bound in (start, end):
+                        if bound and (created.utcoffset() is None) != (bound.utcoffset() is None):
+                            raise RowValidationError("C-07", "created_at", "created_at timezone does not match extraction window")
+                    if (start and created <= start) or (end and created > end):
+                        raise RowValidationError("C-07", "created_at", "created_at is outside the extraction window")
                 if table != "pig_batches":
                     batch_id = clean.get("batch_id", "")
                     if not batch_id and table != "expenses":
@@ -175,12 +199,18 @@ def clean_records(raw_by_table: dict[str, list[dict[str, str]]], headers_by_tabl
                 accepted_rows.append(clean)
                 if clean != source:
                     counts["S-01-standardized"] += 1
+                if any(
+                    str(source.get(field) or "") != str(source.get(field) or "").strip()
+                    for field in TEXT_FIELDS.get(table, ())
+                ):
+                    counts["C-06"] += 1
             except RowValidationError as exc:
                 quarantine.append({
                     "pipeline_run_id": pipeline_run_id,
                     "table_name": table,
                     "source_row": str(line_number),
                     "source_id": source_id,
+                    "batch_id": str(source.get("batch_id") or (source_id if table == "pig_batches" else "")),
                     "rule_id": exc.rule_id,
                     "field": exc.field,
                     "reason": str(exc),
@@ -196,9 +226,10 @@ def clean_records(raw_by_table: dict[str, list[dict[str, str]]], headers_by_tabl
     return accepted, quarantine, duplicate_counts, rule_counts, profiles
 
 
-def profile_and_clean(input_dir: Path, metadata: dict[str, Any]) -> tuple[dict[str, list[dict[str, str]]], dict[str, list[str]], list[dict[str, str]], dict[str, int], dict[str, Counter[str]], dict[str, dict[str, int]]]:
+def profile_and_clean(input_dir: Path, metadata: dict[str, Any]) -> tuple[dict[str, list[dict[str, str]]], dict[str, list[str]], list[dict[str, str]], dict[str, int], dict[str, Counter[str]], dict[str, dict[str, Any]]]:
     raw, headers = load_source_files(input_dir, metadata)
-    for table in TABLES:
-        validate_extraction_window(raw[table], table, metadata.get("window_start"), metadata.get("window_end"))
-    accepted, quarantine, duplicates, rules, profiles = clean_records(raw, headers, str(metadata.get("pipeline_run_id", "")))
+    validate_extraction_window(metadata.get("window_start"), metadata.get("window_end"))
+    accepted, quarantine, duplicates, rules, profiles = clean_records(
+        raw, headers, str(metadata.get("pipeline_run_id", "")), metadata.get("window_start"), metadata.get("window_end")
+    )
     return accepted, headers, quarantine, duplicates, rules, profiles

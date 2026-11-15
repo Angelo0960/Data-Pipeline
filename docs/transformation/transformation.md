@@ -2,9 +2,9 @@
 
 ## Objective
 
-The goal of Stage 2 is to transform the validated dataset handed over from the Extraction Stage into a cleaned, standardized, and business-ready dataset. The transformation process must be documented, traceable, and validated before the data proceeds to the Loading Stage.
+The goal of Stage 2 is to transform the validated dataset handed over from the Extraction Stage into a cleaned, standardized, and business-ready dataset. The transformation process must be documented, traceable, and validated before Stage 2 is marked complete. Database loading is a separate follow-on stage and is outside the BAT 405 midterm scope.
 
-This document describes the transformation process for the PrepAPig Batch Data Pipeline. The pipeline processes four farming-related datasets: `pig_batches`, `feed_records`, `vaccination_records`, and `expenses`. Authentication credentials, passwords, API keys, access tokens, and unrelated profile information are outside the transformation scope.
+This document describes the transformation process for the PrepAPig Batch Data Pipeline. The BAT 405 midterm deliverable covers **Stage 1: Extraction** and **Stage 2: Transformation** only. PostgreSQL loading and recurring scheduling are follow-on work, not midterm acceptance criteria; they remain disabled and are documented only as future scope. The pipeline processes four farming-related datasets: `pig_batches`, `feed_records`, `vaccination_records`, and `expenses`. Authentication credentials, passwords, API keys, access tokens, and unrelated profile information are outside the transformation scope.
 
 ## Repository implementation status
 
@@ -107,65 +107,53 @@ The table below is a **profiling checklist**. The examples are illustrative valu
 
 | Table/file | Column affected | Issue type | Example | Affected records | Planned treatment |
 |---|---|---|---|---|---|
-| `pig_batches.csv` | `id` | Missing or duplicate primary key | Blank ID; repeated UUID | To be measured | Reject or quarantine affected records; see C-01 |
-| `pig_batches.csv` | `batch_code` | Missing, duplicate, or extra whitespace | ` BATCH-001 `; repeated `BATCH-001` | To be measured | Trim whitespace; investigate duplicates; see C-02 and C-03 |
-| `pig_batches.csv` | `pig_count` | Missing, non-integer, or invalid value | Blank; `five`; `-3` | To be measured | Validate as a non-negative integer; quarantine invalid records; see C-04 |
-| `pig_batches.csv` | `start_weight`, `current_weight` | Invalid numeric value or implausible negative value | `abc`; `-12.50` | To be measured | Convert to decimal and quarantine invalid or negative weights; see C-04 |
-| `pig_batches.csv` | `date_acquired`, `created_at` | Invalid or inconsistent date format | `10/04/2026`; malformed timestamp | To be measured | Parse and standardize valid values; quarantine unparseable required dates; see S-01 |
-| `pig_batches.csv` | `breed`, `status` | Whitespace or inconsistent text case | ` landrace `; `active`, `Active` | To be measured | Trim text and normalize known category values; see S-02 |
-| `feed_records.csv` | `id` | Missing or duplicate primary key | Blank ID; repeated UUID | To be measured | Reject or quarantine affected records; see C-01 |
+| `pig_batches.csv` | `id` | Missing, invalid, or duplicate primary key | Blank/invalid ID; repeated UUID | To be measured | Quarantine invalid IDs and conflicting ID groups; retain one exact copy and count the duplicate; see C-01/C-02 |
+| `pig_batches.csv` | `batch_code` | Missing, duplicate, or extra whitespace | ` BATCH-001 `; repeated `BATCH-001` | To be measured | Trim whitespace; quarantine blanks and every collision member; see C-03/C-06 |
+| `pig_batches.csv` | `pig_count` | Missing, non-integer, or invalid value | Blank; `five`; `-3` | To be measured | Validate as a non-negative integer; quarantine invalid records; see C-04/C-05 |
+| `pig_batches.csv` | `start_weight`, `current_weight` | Invalid numeric value or implausible negative value | `abc`; `-12.50` | To be measured | Validate decimal precision and range; quarantine invalid or negative weights; see C-05 |
+| `pig_batches.csv` | `date_acquired`, `created_at` | Invalid or inconsistent date format | `10/04/2026`; malformed timestamp | To be measured | Parse and standardize valid values; quarantine invalid dates/timestamps; see C-07 |
+| `pig_batches.csv` | `breed`, `status` | Whitespace or unclassified category | ` landrace `; observed status values | To be measured | Trim text; profile category frequency and compare only with an approved vocabulary; see C-06/C-09 |
+| `feed_records.csv` | `id` | Missing, invalid, or duplicate primary key | Blank/invalid ID; repeated UUID | To be measured | Quarantine invalid IDs/conflicting groups; retain one exact copy; see C-01/C-02 |
 | `feed_records.csv` | `batch_id` | Missing or orphan foreign key | Blank ID; UUID absent from `pig_batches.id` | To be measured | Quarantine record and report missing parent; see R-01 |
-| `feed_records.csv` | `feed_type` | Missing value or inconsistent text | Blank; ` Starter `; `starter` | To be measured | Trim and normalize known labels; do not invent missing feed type; see C-05 and S-02 |
-| `feed_records.csv` | `quantity_kg` | Invalid or negative quantity | `abc`; `-2.00` | To be measured | Validate decimal and non-negative quantity; quarantine invalid records; see C-04 |
-| `feed_records.csv` | `feeding_date`, `feeding_time` | Invalid or inconsistent date/time | `04-10-2026`; `25:90` | To be measured | Standardize valid values and quarantine unparseable values; see S-01 |
-| `vaccination_records.csv` | `id` | Missing or duplicate primary key | Blank ID; repeated UUID | To be measured | Reject or quarantine affected records; see C-01 |
+| `feed_records.csv` | `feed_type` | Missing value, whitespace, or unclassified category | Blank; ` Starter `; observed feed types | To be measured | Quarantine missing required values, trim text, and profile categories; see C-04/C-06/C-09 |
+| `feed_records.csv` | `quantity_kg` | Invalid or negative quantity | `abc`; `-2.00` | To be measured | Validate decimal precision and range; quarantine invalid records; see C-05 |
+| `feed_records.csv` | `feeding_date`, `feeding_time` | Invalid or inconsistent date/time | `04-10-2026`; `25:90` | To be measured | Standardize valid values and quarantine unparseable values; see C-07 |
+| `vaccination_records.csv` | `id` | Missing, invalid, or duplicate primary key | Blank/invalid ID; repeated UUID | To be measured | Quarantine invalid IDs/conflicting groups; retain one exact copy; see C-01/C-02 |
 | `vaccination_records.csv` | `batch_id` | Missing or orphan foreign key | Blank ID; UUID absent from `pig_batches.id` | To be measured | Quarantine record and report missing parent; see R-01 |
-| `vaccination_records.csv` | `vaccine_name` | Missing value or inconsistent text | Blank; ` vaccine A ` | To be measured | Trim known text; quarantine if required vaccine name is missing; see C-05 and S-02 |
-| `vaccination_records.csv` | `vaccination_date`, `next_due_date` | Invalid date or inconsistent format | `31/31/2026`; mixed date formats | To be measured | Standardize valid dates; quarantine invalid required dates; see S-01 |
-| `vaccination_records.csv` | `status` | Inconsistent or unexpected status | `completed`; `DONE`; `unknown` | To be measured | Map only approved equivalent values; hold unknown values for review; see S-02 |
-| `expenses.csv` | `id` | Missing or duplicate primary key | Blank ID; repeated UUID | To be measured | Reject or quarantine affected records; see C-01 |
+| `vaccination_records.csv` | `vaccine_name` | Missing value, whitespace, or unclassified category | Blank; ` vaccine A `; observed vaccine names | To be measured | Quarantine missing required values, trim text, and profile categories; see C-04/C-06/C-09 |
+| `vaccination_records.csv` | `vaccination_date`, `next_due_date` | Invalid date or inconsistent format | `31/31/2026`; mixed date formats | To be measured | Standardize valid dates; quarantine invalid values under the required/optional field policy; see C-07 |
+| `vaccination_records.csv` | `status` | Unclassified status | Observed status values | To be measured | Profile counts and compare with an approved vocabulary; do not guess mappings; see C-09 |
+| `expenses.csv` | `id` | Missing, invalid, or duplicate primary key | Blank/invalid ID; repeated UUID | To be measured | Quarantine invalid IDs/conflicting groups; retain one exact copy; see C-01/C-02 |
 | `expenses.csv` | `batch_id` | Orphan foreign key (NULL is valid for farm-level costs) | UUID absent from `pig_batches.id` | To be measured | Preserve NULL as farm-level expense and summarize separately; quarantine a non-NULL orphan reference; see R-01 |
-| `expenses.csv` | `expense_type` | Missing value or inconsistent text | Blank; ` Feed `; `feed` | To be measured | Trim and normalize approved labels; see C-05 and S-02 |
-| `expenses.csv` | `amount` | Invalid, negative, or non-numeric amount | `abc`; `-25.00` | To be measured | Validate decimal; quarantine negative or invalid amounts unless an approved rule permits refunds/adjustments; see C-04 |
-| `expenses.csv` | `expense_date`, `created_at` | Invalid or inconsistent date format | `10/04/2026`; malformed timestamp | To be measured | Standardize valid values; quarantine unparseable required dates; see S-01 |
-| All files | Entire record | Exact duplicate rows | Same record repeated in the file | To be measured | Remove exact duplicate copies only after logging them; preserve one record by stable ID; see C-03 |
+| `expenses.csv` | `expense_type` | Missing value, whitespace, or unclassified category | Blank; ` Feed `; observed expense types | To be measured | Quarantine missing required values, trim text, and profile categories; see C-04/C-06/C-09 |
+| `expenses.csv` | `amount` | Invalid, negative, or non-numeric amount | `abc`; `-25.00` | To be measured | Validate decimal precision and range; quarantine invalid amounts unless an approved adjustment rule applies; see C-05 |
+| `expenses.csv` | `expense_date`, `created_at` | Invalid or inconsistent date format | `10/04/2026`; malformed timestamp | To be measured | Standardize valid values; quarantine invalid dates/timestamps; see C-07 |
+| All files | Entire record | Exact duplicate rows | Same record repeated in the file | To be measured | Retain one identical copy and count removed copies; see C-02 |
 
 ### 2.3 Profiling Results Status
 
-No actual CSV contents or profiling output were included in the supplied reference materials. Therefore, this document does not claim that any issue above has been found, and it does not invent affected-record counts or percentages. The transformation job must produce the actual profile report for each run before the cleaning results are approved.
+No actual CSV contents or profiling output are included in this documentation, so the examples above are not claims about observed source data. For each real run, `data_quality_report.csv` records the table, metric/rule, column or category, sample values, count, affected percentage, planned treatment, and severity. Category frequencies are reported as observed values, not labeled “unexpected,” until the owner supplies an approved vocabulary. The report must be generated from the actual input files before cleaning results are reviewed.
 
 ---
 
 
-## 3. Data Cleaning Rules
+## 3. Cleaning Summary
 
-This section defines the data-cleaning rules applied to the extracted PrepAPig data before transformation and loading. Records that fail validation are handled according to the rules below to protect data quality and referential integrity.
+The transformation applies the detailed rule register in the **Data Cleaning Rules** section below. In brief, missing/invalid required values and orphan relationships are quarantined; permitted optional NULLs are preserved; whitespace is trimmed without changing meaningful text; exact duplicate copies are counted and reduced to one retained row; and conflicting primary-key or batch-code groups are quarantined in full. No IDs, amounts, categories, or relationships are invented. The rule register is the single source of truth for rule IDs and actions.
 
-| Rule ID | Cleaning Rule | Description | Action |
-|---|---|---|---|
-| C-01 | Missing Primary Key | A record has no valid primary key (`id`). | Generate a UUID when permitted by the source and target design; otherwise quarantine the record. |
-| C-02 | Duplicate Primary Key | Multiple records contain the same primary key. | Retain the valid record and quarantine or reject conflicting duplicates. |
-| C-03 | Duplicate Batch Code | Multiple pig batches share the same `batch_code`. | Check for duplicate batch records; retain the valid unique batch and flag conflicts for review. |
-| C-04 | Required Fields | Required fields are missing or empty. | Reject or quarantine records missing required values; do not silently invent business data. |
-| C-05 | Numeric Validity | Numeric fields contain invalid, non-numeric, or out-of-range values. | Validate and convert valid values; quarantine invalid values for correction. |
-| C-06 | Whitespace and Invalid Text | Text contains leading/trailing spaces or invalid formatting. | Trim whitespace and normalize text where safe; flag values that cannot be safely corrected. |
-| C-07 | Orphan Child Records | Child records reference a batch that does not exist. | Reject or quarantine the child record until its parent batch is available. |
-| C-08 | Unexpected Categories or Status | Category/status values are outside the accepted values. | Preserve the original value and flag it for review; do not silently map it to another category. |
-| C-09 | Schema Validation Failure | A record does not match the expected source/target structure. | Log the error and quarantine the record rather than loading malformed data. |
+### Missing-Value and Relationship Policy
 
-### 3.1 Missing-Value Policy
+- Missing required values are quarantined; no arbitrary defaults are substituted.
+- Optional values remain NULL when allowed by the source contract.
+- A NULL `expenses.batch_id` is valid farm-level data and is summarized separately.
+- Missing or orphan required batch relationships are quarantined with their source and rule details.
 
-- Missing required values are not replaced with arbitrary defaults.
-- Optional values may remain `NULL` when the target schema allows it.
-- Invalid records are logged with the relevant table, record identifier, rule ID, and reason.
-- Quarantined records are retained for review and possible reprocessing.
+### Duplicate Policy
 
-### 3.2 Duplicate and Referential-Integrity Handling
-
-- Primary-key duplicates are checked before loading.
-- `batch_code` uniqueness is validated for `pig_batches`.
-- Child tables (`feed_records`, `vaccination_records`, and `expenses`) must reference an existing batch.
-- Records that violate referential integrity are not loaded until corrected or their parent record is available.
+- Exact copies with identical ID and field values: retain one, count the extra copies as removed.
+- Same ID with differing values: quarantine every row sharing that ID.
+- Duplicate `batch_code` after trimming: quarantine every batch in the collision group.
+- Do not select a “latest” record or merge batches without an approved source rule.
 
 ## 4. Standardization and Data Type Rules
 
@@ -243,22 +231,23 @@ pig_batches (1)
 
 ## 7. Transformation Validation and Acceptance Criteria
 
-Stage 2 validates the transformed output before handing it to the Loading Stage.
+Stage 2 validates the transformed output before marking the run ready for its documented handover. It does not load the output into a destination database.
 
-| Validation check | Acceptance criteria | Action if failed |
-|---|---|---|
-| Input handover status | Extraction Stage handover is `APPROVED` | Stop processing and request an approved handover |
-| Input files | All four CSV files and required metadata are available and readable | Mark the batch failed; do not load partial outputs |
-| Schema validation | Required columns match the Extraction Stage data contract | Stop or hold for schema review |
-| Primary key validation | No missing or conflicting duplicate IDs in accepted output | Quarantine invalid records or fail the affected dataset |
-| Business identifier validation | `batch_code` is present and unique after standardization | Hold conflicting records for review |
-| Numeric validation | Accepted numeric fields are valid and meet the rules in Section 3 | Quarantine invalid records and record the reason |
-| Date/time validation | Accepted dates and timestamps are parseable and standardized | Quarantine invalid required values |
-| Referential integrity | Every accepted child record refers to an accepted `pig_batches.id` | Quarantine orphan records |
-| Count reconciliation | Input count = accepted output count + quarantined/rejected count, after accounting for logged exact-duplicate handling | Fail validation if the reconciliation does not balance |
-| Aggregation validation | Summary totals equal calculations from the corresponding accepted detail records | Recalculate and investigate mismatches |
-| Idempotency check | Rerunning the same extraction run does not create duplicate output | Replace/upsert that run's output and verify unique source IDs |
-| Audit/log validation | Run ID, input window, input/output counts, rule outcomes, and errors are recorded | Hold handover until traceability metadata is complete |
+| Validation check | Severity | Acceptance criteria | Action if failed |
+|---|---|---|---|
+| Input handover status | Critical | Extraction Stage handover is `APPROVED` | Stop processing and request an approved handover |
+| Input files and schema | Critical | All four CSV files and required metadata are readable and contain the documented columns | Fail the run; do not publish partial output |
+| Primary-key uniqueness | Critical | Accepted output contains no missing or duplicate IDs | Quarantine invalid rows; conflicting ID groups are all quarantined |
+| Business identifier uniqueness | Critical | `batch_code` is present and unique after trimming | Quarantine blank codes and all colliding batch rows |
+| Numeric validation | High | Accepted numeric fields are finite, in range, and use approved precision | Quarantine invalid values and record the rule/reason |
+| Date/time validation | High | Accepted dates and timestamps parse and satisfy the extraction-window rule | Quarantine invalid/out-of-window rows |
+| Referential integrity | Critical | Every accepted required child reference points to an accepted batch; NULL expense `batch_id` remains valid | Quarantine missing or orphan child rows |
+| Count reconciliation | Critical | Per table, input = accepted + quarantined + exact duplicate copies removed | Fail validation if counts do not balance |
+| Aggregation validation | High | Summary totals reconcile to the accepted detail records | Fail validation and investigate |
+| Idempotency and rerun | High | Re-running the same extraction run replaces its output rather than appending duplicates | Do not hand over until repeat behavior is safe |
+| Audit and traceability | High | Run IDs, windows, row counts, applied rules, quarantine reasons, and errors are recorded | Hold handover until traceability is complete |
+
+The automatic-approval rejection-rate threshold is **0% per table**: any quarantined row requires `WARNING / MANUAL REVIEW`, and no quarantined bundle is automatically approved. This conservative threshold avoids silently approving data loss until the project owner approves a different tolerance. Quarantine rows include `pipeline_run_id` (the processing batch), `table_name`, source row and ID, `batch_id` when applicable, rule ID, field, reason, and original record data.
 
 ### Acceptance Status
 
@@ -291,6 +280,7 @@ Stage 2 must produce a transformation log for each run. The log links the input 
 | `quarantined_records` | Number of rows excluded for data-quality reasons |
 | `duplicates_removed` | Number of exact duplicate copies removed under the documented rule |
 | `rules_applied` | Cleaning, standardization, relationship, and derivation rule IDs applied |
+| `rejection_policy` | Per-table quarantined percentage and the automatic-approval rejection-rate threshold/action |
 | `output_location` | Configured path or destination for the transformed output |
 | `error_message` | Safe diagnostic message; must not contain credentials or secrets |
 | `transformation_duration` | Elapsed processing time |
@@ -354,9 +344,9 @@ The same approved input and rule configuration should produce the same transform
 
 ---
 
-## 10. Handover to the Loading Stage
+## 10. Stage 2 Output Handover (Future Loading Boundary)
 
-The Transformation Stage hands over only validated, documented outputs to the Loading Stage.
+The Transformation Stage writes validated, traceable output files for the next approved stage. For the BAT 405 midterm, the acceptance boundary is the Stage 2 output bundle; PostgreSQL loading is not part of this deliverable and remains disabled.
 
 | Handover item | Description |
 |---|---|
@@ -389,14 +379,14 @@ A **quarantined record** is excluded from the business-ready output until it has
 | Rule ID and name | Target | Condition | Action | Justification |
 |---|---|---|---|---|
 | **C-01 — Missing Primary Key** | `id` in all four tables | The primary key is null, blank, or cannot be interpreted as a valid UUID. | Quarantine the affected record. Do not generate a replacement ID. | The source ID is needed to identify and trace each record reliably. |
-| **C-02 — Duplicate Primary Key** | `id` in all four tables | The same ID occurs more than once in a table. | If the rows are exact duplicates (same ID and all field values), retain one copy and log the extra copies. If values conflict for the same ID, hold the affected dataset for investigation; do not choose a record arbitrarily. | Prevents duplicate or conflicting records from being treated as separate facts. |
-| **C-03 — Duplicate Batch Code** | `pig_batches.batch_code` | A batch code is blank after trimming, or two records have the same batch code after trimming. | Trim surrounding whitespace. Quarantine blank values. Hold collisions for review rather than merging batches. | `batch_code` is a unique business identifier in the source schema. |
+| **C-02 — Duplicate Primary Key** | `id` in all four tables | The same ID occurs more than once in a table. | If all field values match, retain the first copy and count later copies as exact duplicates removed. If values differ, quarantine every row in the conflicting ID group with its source row, ID, rule, reason, and run ID; do not retain an arbitrary “first” row. | Prevents conflicting facts from being accepted based on file order. |
+| **C-03 — Duplicate Batch Code** | `pig_batches.batch_code` | A batch code is blank after trimming, or two records have the same batch code after trimming. | Trim surrounding whitespace. Quarantine blank values and every row in a post-trim collision group; require manual review before any of those batches are accepted. | `batch_code` is a unique business identifier in the source schema. |
 | **C-04 — Missing Required Values** | Required columns: `pig_batches.batch_code`, `pig_batches.pig_count`, `feed_records.batch_id`, `feed_records.feed_type`, `feed_records.quantity_kg`, `feed_records.feeding_date`, `vaccination_records.batch_id`, `vaccination_records.vaccine_name`, `vaccination_records.vaccination_date`, `expenses.expense_type`, `expenses.amount`, and `expenses.expense_date` | A required value is null or blank. | Quarantine the affected record. A NULL `expenses.batch_id` is valid farm-level data, not a missing required value. | Avoids inventing batch, feed, vaccination, or expense information. |
 | **C-05 — Invalid Numeric Values** | `pig_batches.pig_count`, `pig_batches.start_weight`, `pig_batches.current_weight`, `feed_records.quantity_kg`, `expenses.amount` | A value cannot be converted to its expected numeric type, is outside the basic permitted range, or has more precision than the approved output precision. | Require `pig_count` to be a non-negative whole number. Require weights and feed quantity to be non-negative decimals. Quarantine non-numeric or negative values. For `expenses.amount`, quarantine negative values unless the project team approves a documented refund or adjustment rule. Do not silently round excess precision. | Prevents invalid counts, weights, quantities, and expense values from distorting reports. |
 | **C-06 — Whitespace and Invalid Text** | Text fields in all four tables, including `batch_code`, `breed`, `status`, `feed_type`, `vaccine_name`, `administered_by`, `expense_type`, `notes`, and `description` | A text value contains leading or trailing whitespace or consists only of whitespace. | Trim leading and trailing whitespace. Treat whitespace-only required values as missing and quarantine the record under C-04. Preserve meaningful internal spaces and punctuation. | Prevents false mismatches while preserving the original meaning of names and descriptions. |
 | **C-07 — Invalid Date or Time** | `date_acquired`, `feeding_date`, `feeding_time`, `vaccination_date`, `next_due_date`, `expense_date`, and `created_at` | A date or time cannot be parsed unambiguously, or a required date is missing. | Quarantine records with invalid required dates or times. An invalid optional date such as `next_due_date` may remain null only if the source contract permits it; record the issue. Do not guess between ambiguous date formats. | Keeps time-based reports accurate and prevents incorrect scheduling information. |
-| **C-08 — Orphan Child Record** | Required `batch_id` in `feed_records` and `vaccination_records`; non-NULL `expenses.batch_id` | A required child `batch_id` is missing, or a supplied `batch_id` does not match an accepted `pig_batches.id`. | Quarantine the affected record and log the unmatched `batch_id`. Preserve a NULL expense `batch_id` as farm-level data. | Maintains valid parent-child relationships without discarding legitimate farm costs. |
-| **C-09 — Unexpected Category or Status** | `pig_batches.status`, `vaccination_records.status`, `breed`, `feed_type`, `vaccine_name`, and `expense_type` | A value does not match an approved reference value or mapping. | Keep the original value for review or quarantine the affected record if the value prevents valid processing. Do not silently convert it to a guessed category. | Preserves source meaning and avoids misleading category-based analysis. |
+| **R-01 — Orphan Child Record** | Required `batch_id` in `feed_records` and `vaccination_records`; non-NULL `expenses.batch_id` | A required child `batch_id` is missing, or a supplied `batch_id` does not match an accepted `pig_batches.id`. | Quarantine the affected record and log the unmatched `batch_id`. Preserve a NULL expense `batch_id` as farm-level data. | Maintains valid parent-child relationships without discarding legitimate farm costs. |
+| **C-09 — Unclassified Category or Status** | `pig_batches.status`, `vaccination_records.status`, `breed`, `feed_type`, `vaccine_name`, and `expense_type` | The source value is not present in an approved reference list; no approved category vocabulary is currently configured. | Profile each observed value with count, sample, and affected percentage. Treat values as unclassified for review, not automatically “unexpected”; preserve them and do not map or quarantine solely for being unfamiliar until an approved reference list exists. | Prevents guessed category mappings and makes the missing reference-data decision explicit. |
 | **C-10 — Schema or Required-Column Failure** | All four input files | A file is unreadable, a required column is absent, or the received structure is incompatible with the documented schema. | Stop or hold the batch. Record the file and schema error. Do not silently drop columns or continue with partial input. | Ensures that the transformation uses the agreed Extraction Stage data contract. |
 
 ### 3.3 Missing and Null Value Policy
@@ -414,9 +404,9 @@ Duplicate checks are performed separately for each table:
 
 1. Compare primary key `id` values within the same table.
 2. If repeated IDs have identical values in every column, retain one copy and count the remaining copies as exact duplicates removed.
-3. If repeated IDs have different values, hold the affected dataset for investigation. No “latest record” rule is applied because the documented schema does not define an `updated_at` column.
-4. Check `pig_batches.batch_code` for uniqueness after whitespace trimming. If trimming creates a collision, hold the conflicting batches for review.
-5. Record duplicate counts and the retention decision in the data-quality report.
+3. If repeated IDs have different values, quarantine every row in that conflicting ID group for review; no row is kept merely because it appeared first. No “latest record” rule is applied because the documented schema does not define an `updated_at` column.
+4. Check `pig_batches.batch_code` for uniqueness after whitespace trimming. If trimming creates a collision, quarantine every row in that collision group.
+5. Record duplicate counts, retained rows, quarantined group members, and the retention decision in the data-quality report.
 
 ### 3.5 Cleaning Output and Audit Requirements
 

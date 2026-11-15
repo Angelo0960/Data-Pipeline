@@ -502,7 +502,7 @@ def output_columns(table: str, input_headers: list[str], rows: list[dict[str, st
 
 
 def write_quarantine(path: Path, records: list[dict[str, str]]) -> None:
-    columns = ["table_name", "source_row", "source_id", "rule_id", "reason", "record_json"]
+    columns = ["pipeline_run_id", "table_name", "source_row", "source_id", "batch_id", "rule_id", "reason", "record_json"]
     write_csv(path, records, columns)
 
 
@@ -634,6 +634,15 @@ def transform(args: argparse.Namespace) -> dict[str, Any]:
             "transformation_status": transformation_status,
             "handover_decision": decision,
             "counts": summary_counts,
+            "rejection_policy": {
+                "automatic_approval_threshold_percent": 0.0,
+                "rates_by_table_percent": {
+                    table: round((100.0 * values["quarantined_records"] / values["input_records"]), 2)
+                    if values["input_records"] else 0.0
+                    for table, values in summary_counts.items()
+                },
+                "action": "Any quarantined row requires MANUAL REVIEW; no quarantined bundle is automatically approved.",
+            },
             "summary_rows": {
                 "feed_summary": len(feed_summary),
                 "expense_summary": len(expense_summary),

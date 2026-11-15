@@ -380,7 +380,7 @@ The extraction process produces one metadata and log record for every scheduled 
 
 ### 4.2 How Metadata and Logs Connect to the Extraction Process
 
-1. Node.js Cron starts the Python ETL script and the script creates a unique `pipeline_run_id`.
+1. In the current repository, an operator invokes the Python extraction entry point on demand; it creates a unique `pipeline_run_id`. A future scheduler may trigger that same entry point after the scheduler, daily time, and timezone are approved and configured.
 2. The script records `extraction_start` and uses it as the fixed `window_end` for the current extraction run.
 3. For each Supabase table, the script reads the previous successful watermark into `window_start` and extracts records where `created_at` satisfies:
 
