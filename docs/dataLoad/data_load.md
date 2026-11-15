@@ -563,3 +563,171 @@ All results must be recorded against the pipeline run ID, transformation
 run ID, batch ID, and affected target table.
 
 ------------------------------------------------------------------------
+## 6. Load Metadata and Log Specification
+
+The PrepAPig load process requires metadata and logs for each batch
+execution. These records make it possible to monitor the load,
+troubleshoot errors, audit processing, trace target data to its approved
+transformation output, and recover a failed batch.
+
+### 6.1 Required Metadata Fields
+
+  ------------------------------------------------------------------------------
+  Field Name                Purpose                 Example Value / Format
+  ------------------------- ----------------------- ----------------------------
+  `run_id`                  Unique identifier for   `LOAD_20261115_0400`
+                            the load pipeline       
+                            execution               
+
+  `transformation_run_id`   Links the load to the   `TRN_20261115_0300`
+                            transformation          
+                            execution that produced 
+                            the files               
+
+  `batch_id`                Identifies the batch    `BATCH_20261114`
+                            being processed         
+
+  `batch_window`            Identifies the          `2026-11-14 to 2026-11-14`
+                            reporting date range    
+                            covered by the batch    
+
+  `table_name`              Identifies the          `feed_records`
+                            PostgreSQL target table 
+                            being loaded            
+
+  `load_type`               Identifies the loading  `INCREMENTAL`
+                            method used             
+
+  `load_start_ts`           Records when the table  `2026-11-15 04:00:02`
+                            or batch load starts    
+
+  `load_end_ts`             Records when the table  `2026-11-15 04:03:41`
+                            or batch load ends      
+
+  `load_duration_sec`       Measures the time taken `219`
+                            by the load             
+
+  `status`                  Records the final       `SUCCESS`, `WARNING`, or
+                            result of the load      `FAILED`
+
+  `records_received`        Number of rows received `250`
+                            from the approved       
+                            transformed input       
+
+  `records_inserted`        Number of new rows      `230`
+                            inserted into the       
+                            target                  
+
+  `records_updated`         Number of existing rows `20`
+                            updated through upsert  
+
+  `records_rejected`        Number of received rows `0`
+                            that were not written   
+
+  `pre_load_result`         Outcome of the pre-load `PASS`
+                            validation checks       
+
+  `post_load_result`        Outcome of the          `PASS`
+                            post-load validation    
+                            checks                  
+
+  `error_code`              Identifies a database   `NULL`
+                            or load error, if       
+                            applicable              
+
+  `error_message`           Describes the error, if `NULL`
+                            applicable              
+
+  `load_code_version`       Identifies the version  `v1.0.0`
+                            of the Python loading   
+                            code                    
+  ------------------------------------------------------------------------------
+
+*The example values are illustrative. Actual IDs, timestamps, counts,
+statuses, errors, and code versions must be taken from the real
+execution. The current Data Load specification identifies the Python
+module as `pipeline.load` but does not state a deployed version number.*
+
+### 6.2 Example Load Log Record
+
+The following is an example of one table's load record. Equivalent
+records should be maintained for each target table or at the batch level
+with table-level counts available.
+
+  Metadata                Example Recorded Value
+  ----------------------- ----------------------------
+  Pipeline Run ID         `LOAD_20261115_0400`
+  Transformation Run ID   `TRN_20261115_0300`
+  Batch ID                `BATCH_20261114`
+  Batch Window            `2026-11-14 to 2026-11-14`
+  Target Table            `feed_records`
+  Load Type               `INCREMENTAL`
+  Load Start              `2026-11-15 04:00:02`
+  Load End                `2026-11-15 04:03:41`
+  Load Duration           `219 seconds`
+  Records Received        `250`
+  Records Inserted        `230`
+  Records Updated         `20`
+  Records Rejected        `0`
+  Pre-Load Result         `PASS`
+  Post-Load Result        `PASS`
+  Final Status            `SUCCESS`
+  Error Code / Message    `NULL`
+  Load Code Version       `v1.0.0`
+
+### 6.3 Log Status Definitions
+
+  -----------------------------------------------------------------------
+  Status                  Meaning                 Action
+  ----------------------- ----------------------- -----------------------
+  `SUCCESS`               All required writes and Record completion and
+                          critical validation     allow the batch to
+                          checks completed        proceed to the
+                          successfully            acceptance and handover
+                                                  step
+
+  `WARNING`               A non-critical issue    Record the warning and
+                          requires attention      hold publication for
+                                                  review
+
+  `FAILED`                A critical error        Record the error, roll
+                          prevented successful    back uncommitted work,
+                          loading or validation   and stop the batch
+  -----------------------------------------------------------------------
+
+### 6.4 How Metadata and Logs Are Used
+
+  ------------------------------------------------------------------------
+  Purpose                             Use in PrepAPig
+  ----------------------------------- ------------------------------------
+  Monitoring                          Track batch status, target table,
+                                      load duration, and
+                                      received/inserted/updated/rejected
+                                      counts
+
+  Troubleshooting                     Identify the failed table, error
+                                      code, error message, and validation
+                                      check associated with a problem
+
+  Auditing                            Review when a batch was processed,
+                                      which approved handover was used,
+                                      and what result was recorded
+
+  Data lineage                        Trace target data through `run_id`,
+                                      `transformation_run_id`, `batch_id`,
+                                      and `batch_window`
+
+  Recovery                            Identify an incomplete or failed
+                                      batch and determine which approved
+                                      handover and run need to be retried
+
+  Reconciliation                      Compare received, inserted, updated,
+                                      and rejected counts and verify the
+                                      loaded summaries against the
+                                      transformed summary files
+  ------------------------------------------------------------------------
+
+Logs must not contain database passwords, API keys, or connection
+secrets. Credentials remain in protected environment variables or the
+approved secrets-management mechanism described in the current Data Load
+design.
