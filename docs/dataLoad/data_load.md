@@ -384,3 +384,65 @@ A rerun must use the same approved transformed handover unless a
 corrected transformation run has been produced and approved. The load
 stage must not silently replace the input with newly extracted or newly
 transformed data.
+
+## 4. Pre-Load Validation Checks
+
+Pre-load validation is performed before the Python loading module (`pipeline.load`) writes data to the PostgreSQL `prepapig_etl` schema. The checks confirm that the database is ready and that the incoming transformed files are complete, approved, and compatible with the target tables.
+
+For each check, the table identifies the **Check Name**, **Target**, **Purpose**, **Validation Criteria**, and **Severity**. A **Critical** failure stops the load. A **Non-critical** warning is recorded and reviewed.
+
+### 4.1 Pre-Load Validation Checklist
+
+| Check Name                              | Target                                              | Purpose                                                                                  | Validation Criteria                                                                                                                                                                                | Severity |
+|:----------------------------------------|:----------------------------------------------------|:-----------------------------------------------------------------------------------------|:---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|:---------|
+| Target Connection and Write Permissions | PostgreSQL database and `prepapig_etl` schema       | Confirm that the loading module can connect and perform the required database operations | Connection succeeds; the loading account has the required `INSERT`, `UPDATE`, and `SELECT` permissions                                                                                             | Critical |
+| Target Schema Match                     | Seven target tables in `prepapig_etl`               | Prevent missing-table, missing-column, and data-type errors                              | All seven target tables and required columns exist; column names and data types match the approved target data contract                                                                            | Critical |
+| Transformation Handover Status          | Transformation handover metadata                    | Ensure that only approved transformed data is loaded                                     | Handover status is `APPROVED`; transformation run ID, pipeline run ID, batch ID, and reporting window are present                                                                                  | Critical |
+| Input File Completeness                 | Four detail files and three summary files           | Prevent an incomplete batch from being loaded                                            | All seven required transformed files exist in the run-specific output directory and are readable                                                                                                   | Critical |
+| Input Record Count                      | Transformed files and handover metadata             | Confirm that the received files match the approved handover                              | Actual record count for each file equals the expected count recorded in the handover metadata                                                                                                      | Critical |
+| Parent and Foreign-Key Check            | `pig_batches.id` and child-table `batch_id` columns | Prevent child records from referencing a missing pig batch                               | Every non-null `batch_id` in `feed_records`, `vaccination_records`, and `expenses` matches an existing or incoming `pig_batches.id`; a null `expenses.batch_id` is allowed for farm-level expenses | Critical |
+| Duplicate Batch Check                   | Batch/load history using `batch_id`                 | Avoid processing a batch that has already completed successfully                         | The batch is not already recorded with final status `SUCCESS`, and no load for the same batch is currently running                                                                                 | Critical |
+| Target Storage Availability             | PostgreSQL target database                          | Ensure that the database can accommodate the incoming batch                              | Sufficient target storage is available for the expected load                                                                                                                                       | Critical |
+
+### 4.2 Required Transformed Input Files
+
+The load receives the following seven files from the transformation stage. They are expected in the run-specific directory:
+
+`pipeline/data/transformed/<pipeline_run_id>/`
+
+| Load Order | Transformed Input File                | Target Table           | Description                                                    |
+|-----------:|:--------------------------------------|:-----------------------|:---------------------------------------------------------------|
+|          1 | `pig_batches_transformed.csv`         | `pig_batches`          | Validated pig batch records; parent records for related tables |
+|          2 | `feed_records_transformed.csv`        | `feed_records`         | Validated feed records associated with pig batches             |
+|          3 | `vaccination_records_transformed.csv` | `vaccination_records`  | Validated vaccination and due-date records                     |
+|          4 | `expenses_transformed.csv`            | `expenses`             | Validated farm-level and batch-related expense records         |
+|          5 | `feed_summary.csv`                    | `feed_summary`         | Feed-consumption totals grouped by batch and reporting window  |
+|          6 | `expense_summary.csv`                 | `expense_summary`      | Expense totals grouped by batch and reporting window           |
+|          7 | `expense_type_summary.csv`            | `expense_type_summary` | Expense totals grouped by expense type and reporting window    |
+
+All seven files must belong to the same approved handover. The expected count for each file must come from the transformation handover metadata, not from an estimate made during loading.
+
+### 4.3 Validation Procedure
+
+1.  Connect to the configured PostgreSQL database and confirm access to the `prepapig_etl` schema.
+2.  Confirm that the loading account has the required `INSERT`, `UPDATE`, and `SELECT` permissions.
+3.  Confirm that the seven target tables and their required columns exist and match the target data contract.
+4.  Verify that the transformation handover is marked `APPROVED` and includes the pipeline run ID, transformation run ID, batch ID, and reporting window.
+5.  Confirm that all seven transformed files exist in the run-specific output directory and can be read.
+6.  Compare each file’s actual record count with its expected count in the handover metadata.
+7.  Check that each non-null child `batch_id` refers to a valid `pig_batches.id`. Do not reject a null `expenses.batch_id` when it represents an allowed farm-level expense.
+8.  Check batch history to ensure the batch has not already completed successfully and is not currently being loaded.
+9.  Confirm that sufficient PostgreSQL storage is available.
+
+### 4.4 Severity and Decision
+
+| Result    | Meaning                                                                              | Required Action                                                                                         |
+|:----------|:-------------------------------------------------------------------------------------|:--------------------------------------------------------------------------------------------------------|
+| `PASS`    | The validation condition is satisfied                                                | Continue to the next check                                                                              |
+| `WARNING` | A non-critical issue is detected and does not violate a critical loading requirement | Record the warning and request review                                                                   |
+| `FAIL`    | A critical requirement is not satisfied                                              | Stop the load, record the failed check and reason, and notify the responsible developer or project lead |
+
+The batch may proceed only when all critical pre-load checks pass. A failed batch must not write records to the target. Validation results must be traceable through the pipeline run ID, transformation run ID, and batch ID.
+
+------------------------------------------------------------------------
+
