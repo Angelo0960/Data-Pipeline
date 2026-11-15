@@ -933,3 +933,46 @@ broader database recovery situation.
 
 
 ------------------------------------------------------------------------
+
+## 8. Load Acceptance, Rollback, and Completion Rules
+
+The load process determines whether a batch is approved, requires manual review, or must be rejected. Critical validation checks must pass before the loaded data is made available for reporting and analysis.
+
+### Decision Rules
+
+| Overall Condition | Acceptance Decision | Pipeline Action | Decision Type | Responsible Person/Role |
+|---|---|---|---|---|
+| All target tables pass validation and record reconciliation matches | APPROVED | Mark the batch as complete and make the loaded data available for reporting and analysis | Automatic | ETL Pipeline |
+| One or more non-critical warnings are detected, but no critical errors exist | MANUAL REVIEW | Hold batch completion and notify the pipeline administrator for investigation | Manual | ETL Administrator |
+| A critical validation check fails, such as a missing required value, duplicate primary key, or foreign key violation | REJECTED | Roll back the failed transaction, record the error, and prevent the batch from being published | Automatic | ETL Pipeline |
+| Database connection fails or the loading process is interrupted | FAILED | Roll back incomplete changes and retry the batch up to three times, with a five-minute interval between attempts | Automatic | ETL Pipeline |
+| Manual review confirms that the warning has been resolved | APPROVED | Complete the batch and allow the data to be used by downstream reports | Manual | ETL Administrator |
+
+### Validation Summary
+
+| Target Table | Validation Check | Expected Result |
+|---|---|---|
+| `pig_batches` | Primary key uniqueness and required column validation | PASS when no duplicate IDs or missing required values are found |
+| `feed_records` | Primary key uniqueness and `batch_id` foreign key validation | PASS when all records reference valid pig batches |
+| `vaccination_records` | Primary key uniqueness and `batch_id` foreign key validation | PASS when all records reference valid pig batches |
+| `expenses` | Primary key uniqueness and `batch_id` relationship validation | PASS when all non-NULL batch references are valid |
+| `feed_summary` | Record count and feed quantity reconciliation | PASS when summary values match the loaded feed records |
+| `expense_summary` | Expense total reconciliation | PASS when summary totals match the loaded expense records |
+| `expense_type_summary` | Expense category and amount reconciliation | PASS when category totals match the loaded expense records |
+| Overall Load | All critical checks and record reconciliation | APPROVED when all critical checks pass and received records equal loaded records plus rejected records |
+
+After a successful load, the pipeline records the final batch status, record counts, validation results, and completion timestamp. The ETL administrator can use the load logs to monitor the process and confirm that the updated data is available for reporting and analysis.
+
+## 9. Common Load Problems and Mitigation
+
+The following problems may occur when loading transformed PrepAPig data into the PostgreSQL target database. Each problem includes its possible cause, impact, and proposed mitigation.
+
+| Problem | Possible Cause | Impact | Mitigation |
+|---|---|---|---|
+| Duplicate records after rerunning a batch | The same batch is loaded more than once without checking existing records | Duplicate pig, feed, vaccination, or expense records may affect reporting totals | Check the batch ID and existing primary keys before loading. Use upsert logic or batch-based replacement to prevent duplicate records |
+| Foreign key violation | A child record references a `batch_id` that does not exist in `pig_batches` | The database rejects the affected records or transaction | Load `pig_batches` before child tables. Validate foreign key references before inserting child records |
+| Data type or constraint violation | The incoming data does not match the PostgreSQL column type or required constraints | Records may be rejected and the batch may fail | Validate the incoming schema against the target tables before loading. Record rejected rows and their corresponding error messages |
+| Partial load after interruption | The database connection is lost or the loading process stops before all tables are completed | Some tables may contain incomplete data, resulting in inconsistent reports | Use database transactions for the batch load. Roll back incomplete changes and rerun the failed batch |
+| Database connection failure | PostgreSQL is unavailable, connection settings are incorrect, or the database server is overloaded | The pipeline cannot write data to the target database | Verify database availability and connection settings before loading. Retry the connection up to three times with a five-minute interval |
+| Incorrect summary totals | Not all source records were loaded successfully or the summary data does not match the loaded records | Feed and expense reports may display inaccurate totals | Reconcile the summary tables against the loaded `feed_records` and `expenses` data. Reject or hold the batch when totals do not match |
+| Slow loading performance | Large batches, excessive individual insert operations, or database resource limitations | The load takes longer and delays report availability | Use bulk inserts or batch inserts, review database indexes, and schedule loading during off-peak hours |
